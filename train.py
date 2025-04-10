@@ -39,16 +39,10 @@ sys.path.insert(0, root_path)
 
 
 parser = argparse.ArgumentParser(description="Fuse Detection in Pytorch")
-parser.add_argument(
-    "-m", "--model", default="lanegcn", type=str, metavar="MODEL", help="model name"
-)
+parser.add_argument("-m", "--model", default="lanegcn", type=str, metavar="MODEL", help="model name")
 parser.add_argument("--eval", action="store_true")
-parser.add_argument(
-    "--resume", default="", type=str, metavar="RESUME", help="checkpoint path"
-)
-parser.add_argument(
-    "--weight", default="", type=str, metavar="WEIGHT", help="checkpoint path"
-)
+parser.add_argument("--resume", default="", type=str, metavar="RESUME", help="checkpoint path")
+parser.add_argument("--weight", default="", type=str, metavar="WEIGHT", help="checkpoint path")
 
 
 def main():
@@ -64,9 +58,7 @@ def main():
     config, Dataset, collate_fn, net, loss, post_process, opt = model.get_model()
 
     if config["horovod"]:
-        opt.opt = hvd.DistributedOptimizer(
-            opt.opt, named_parameters=net.named_parameters()
-        )
+        opt.opt = hvd.DistributedOptimizer(opt.opt, named_parameters=net.named_parameters())
 
     if args.resume or args.weight:
         ckpt_path = args.resume or args.weight
@@ -81,9 +73,7 @@ def main():
     if args.eval:
         # Data loader for evaluation
         dataset = Dataset(config["val_split"], config, train=False)
-        val_sampler = DistributedSampler(
-            dataset, num_replicas=hvd.size(), rank=hvd.rank()
-        )
+        val_sampler = DistributedSampler(dataset, num_replicas=hvd.size(), rank=hvd.rank())
         val_loader = DataLoader(
             dataset,
             batch_size=config["val_batch_size"],
@@ -116,9 +106,7 @@ def main():
 
     # Data loader for training
     dataset = Dataset(config["train_split"], config, train=True)
-    train_sampler = DistributedSampler(
-        dataset, num_replicas=hvd.size(), rank=hvd.rank()
-    )
+    train_sampler = DistributedSampler(dataset, num_replicas=hvd.size(), rank=hvd.rank())
     train_loader = DataLoader(
         dataset,
         batch_size=config["batch_size"],
@@ -154,7 +142,7 @@ def main():
 def worker_init_fn(pid):
     np_seed = hvd.rank() * 1024 + int(pid)
     np.random.seed(np_seed)
-    random_seed = np.random.randint(2 ** 32 - 1)
+    random_seed = np.random.randint(2**32 - 1)
     random.seed(random_seed)
 
 
@@ -165,14 +153,12 @@ def train(epoch, config, train_loader, net, loss, post_process, opt, val_loader=
     num_batches = len(train_loader)
     epoch_per_batch = 1.0 / num_batches
     save_iters = int(np.ceil(config["save_freq"] * num_batches))
-    display_iters = int(
-        config["display_iters"] / (hvd.size() * config["batch_size"])
-    )
+    display_iters = int(config["display_iters"] / (hvd.size() * config["batch_size"]))
     val_iters = int(config["val_iters"] / (hvd.size() * config["batch_size"]))
 
     start_time = time.time()
     metrics = dict()
-    for i, data in tqdm(enumerate(train_loader),disable=hvd.rank()):
+    for i, data in tqdm(enumerate(train_loader), disable=hvd.rank()):
         epoch += epoch_per_batch
         data = dict(data)
 
@@ -186,9 +172,7 @@ def train(epoch, config, train_loader, net, loss, post_process, opt, val_loader=
         lr = opt.step(epoch)
 
         num_iters = int(np.round(epoch * num_batches))
-        if hvd.rank() == 0 and (
-            num_iters % save_iters == 0 or epoch >= config["num_epochs"]
-        ):
+        if hvd.rank() == 0 and (num_iters % save_iters == 0 or epoch >= config["num_epochs"]):
             save_ckpt(net, opt, config["save_dir"], epoch)
 
         if num_iters % display_iters == 0:

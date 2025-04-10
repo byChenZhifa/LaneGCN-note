@@ -13,171 +13,189 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from data import ArgoDataset, collate_fn
-from utils import gpu, to_long,  Optimizer, StepLR
+from utils import gpu, to_long, Optimizer, StepLR
 
 from layers import Conv1d, Res1d, Linear, LinearRes, Null
 from numpy import float64, ndarray
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-
-file_path = os.path.abspath(__file__)
-root_path = os.path.dirname(file_path)
-model_name = os.path.basename(file_path).split(".")[0]
+file_path = os.path.abspath(__file__)  # 获取当前文件的绝对路径
+root_path = os.path.dirname(file_path)  # 获取当前文件所在目录
+model_name = os.path.basename(file_path).split(".")[0]  # 获取模型名称（文件名去掉扩展名）
 
 ### config ###
 config = dict()
 """Train"""
-config["display_iters"] = 205942
-config["val_iters"] = 205942 * 2
-config["save_freq"] = 1.0
-config["epoch"] = 0
-config["horovod"] = True
-config["opt"] = "adam"
-config["num_epochs"] = 36
-config["lr"] = [1e-3, 1e-4]
-config["lr_epochs"] = [32]
-config["lr_func"] = StepLR(config["lr"], config["lr_epochs"])
+config["display_iters"] = 205942  # 显示迭代间隔
+config["val_iters"] = 205942 * 2  # 验证迭代间隔
+config["save_freq"] = 1.0  # 保存频率
+config["epoch"] = 0  # 当前训练轮次
+config["horovod"] = True  # 是否使用Horovod分布式训练
+config["opt"] = "adam"  # 优化器类型
+config["num_epochs"] = 36  # 总训练轮次
+config["lr"] = [1e-3, 1e-4]  # 学习率列表
+config["lr_epochs"] = [32]  # 学习率调整的轮次
+config["lr_func"] = StepLR(config["lr"], config["lr_epochs"])  # 学习率调度器
 
 
 if "save_dir" not in config:
-    config["save_dir"] = os.path.join(
-        root_path, "results", model_name
-    )
+    config["save_dir"] = os.path.join(root_path, "results", model_name)  # 设置默认保存目录
 
 if not os.path.isabs(config["save_dir"]):
-    config["save_dir"] = os.path.join(root_path, "results", config["save_dir"])
+    config["save_dir"] = os.path.join(root_path, "results", config["save_dir"])  # 确保保存目录为绝对路径
 
-config["batch_size"] = 32
-config["val_batch_size"] = 32
-config["workers"] = 0
-config["val_workers"] = config["workers"]
+config["batch_size"] = 32  # 训练批次大小
+config["val_batch_size"] = 32  # 验证批次大小
+config["workers"] = 0  # 数据加载线程数
+config["val_workers"] = config["workers"]  # 验证数据加载线程数
 
 
 """Dataset"""
 # Raw Dataset
-config["train_split"] = os.path.join(
-    root_path, "dataset/train/data"
-)
-config["val_split"] = os.path.join(root_path, "dataset/val/data")
-config["test_split"] = os.path.join(root_path, "dataset/test_obs/data")
+config["train_split"] = os.path.join(root_path, "dataset/train/data")  # 训练数据路径
+config["val_split"] = os.path.join(root_path, "dataset/val/data")  # 验证数据路径
+config["test_split"] = os.path.join(root_path, "dataset/test_obs/data")  # 测试数据路径
 
 # Preprocessed Dataset
-config["preprocess"] = True # whether use preprocess or not
-config["preprocess_train"] = os.path.join(
-    root_path, "dataset","preprocess", "train_crs_dist6_angle90.p"
-)
-config["preprocess_val"] = os.path.join(
-    root_path,"dataset", "preprocess", "val_crs_dist6_angle90.p"
-)
-config['preprocess_test'] = os.path.join(root_path, "dataset",'preprocess', 'test_test.p')
+config["preprocess"] = True  # 是否使用预处理数据
+config["preprocess_train"] = os.path.join(root_path, "dataset", "preprocess", "train_crs_dist6_angle90.p")  # 预处理训练数据路径
+config["preprocess_val"] = os.path.join(root_path, "dataset", "preprocess", "val_crs_dist6_angle90.p")  # 预处理验证数据路径
+config["preprocess_test"] = os.path.join(root_path, "dataset", "preprocess", "test_test.p")  # 预处理测试数据路径
 
 """Model"""
-config["rot_aug"] = False
-config["pred_range"] = [-100.0, 100.0, -100.0, 100.0]
-config["num_scales"] = 6
-config["n_actor"] = 128
-config["n_map"] = 128
-config["actor2map_dist"] = 7.0
-config["map2actor_dist"] = 6.0
-config["actor2actor_dist"] = 100.0
-config["pred_size"] = 30
-config["pred_step"] = 1
-config["num_preds"] = config["pred_size"] // config["pred_step"]
-config["num_mods"] = 6
-config["cls_coef"] = 1.0
-config["reg_coef"] = 1.0
-config["mgn"] = 0.2
-config["cls_th"] = 2.0
-config["cls_ignore"] = 0.2
+config["rot_aug"] = False  # 是否使用旋转增强
+config["pred_range"] = [-100.0, 100.0, -100.0, 100.0]  # 预测范围
+config["num_scales"] = 6  # 尺度数量
+config["n_actor"] = 128  # Actor特征维度
+config["n_map"] = 128  # 地图特征维度
+config["actor2map_dist"] = 7.0  # Actor到地图的最大距离
+config["map2actor_dist"] = 6.0  # 地图到Actor的最大距离
+config["actor2actor_dist"] = 100.0  # Actor之间的最大距离
+config["pred_size"] = 30  # 预测时间步长
+config["pred_step"] = 1  # 预测步长
+config["num_preds"] = config["pred_size"] // config["pred_step"]  # 预测点数量
+config["num_mods"] = 6  # 预测模式数量
+config["cls_coef"] = 1.0  # 分类损失系数
+config["reg_coef"] = 1.0  # 回归损失系数
+config["mgn"] = 0.2  # 边缘值
+config["cls_th"] = 2.0  # 分类阈值
+config["cls_ignore"] = 0.2  # 分类忽略阈值
 ### end of config ###
+
 
 class Net(nn.Module):
     """
-    Lane Graph Network contains following components:
+        Lane Graph Network contains following components:
         1. ActorNet: a 1D CNN to process the trajectory input
-        2. MapNet: LaneGraphCNN to learn structured map representations 
-           from vectorized map data
-        3. Actor-Map Fusion Cycle: fuse the information between actor nodes 
-           and lane nodes:
-            a. A2M: introduces real-time traffic information to 
-                lane nodes, such as blockage or usage of the lanes
-            b. M2M:  updates lane node features by propagating the 
-                traffic information over lane graphs
-            c. M2A: fuses updated map features with real-time traffic 
-                information back to actors
-            d. A2A: handles the interaction between actors and produces
-                the output actor features
-        4. PredNet: prediction header for motion forecasting using 
-           feature from A2A
+        2. MapNet: LaneGraphCNN to learn structured map representations from vectorized map data
+        3. Actor-Map Fusion Cycle: fuse the information between actor nodes and lane nodes:
+            a. A2M: introduces real-time traffic information to lane nodes, such as blockage or usage of the lanes 
+            b. M2M:  updates lane node features by propagating the traffic information over lane graphs
+            c. M2A: fuses updated map features with real-time traffic information back to actors
+            d. A2A: handles the interaction between actors and produces the output actor features
+        4. PredNet: prediction header for motion forecasting using feature from A2A
+        
+    Lane Graph Network 包含以下组件：
+        1. ActorNet：一个 1D CNN，用于处理轨迹输入
+        2. MapNet：LaneGraphCNN 从矢量化地图数据中学习结构化地图表示
+        3. Actor-Map 融合循环：将 Actor 节点和 lane 节点之间的信息融合：
+            a. A2M：将实时交通信息引入车道节点，例如车道的阻塞或使用
+            b. M2M：通过在车道图上传播交通信息来更新车道节点特征
+            c. M2A：将更新的地图功能与实时交通信息融合在一起，返回给参与者
+            d. A2A：处理 Actor 之间的交互并生成输出 Actor 特征
+        4. PredNet：使用 A2A 功能进行运动预测的预测标头
+        
+    LaneGCN 轨迹预测模型：
+        核心功能：通过融合车辆轨迹特征与高精度地图特征，实现多模态轨迹预测
+        主要组成部分：
+        1. ActorNet - 车辆轨迹特征提取
+        2. MapNet - 地图拓扑结构特征提取
+        3. 融合模块（A2M/M2M/M2A/A2A）- 车路交互建模
+        4. PredNet - 多模态轨迹预测
     """
+
     def __init__(self, config):
+        """
+        初始化 Lane Graph Network。
+        :param config: 配置字典，包含模型参数。
+        """
         super(Net, self).__init__()
         self.config = config
 
-        self.actor_net = ActorNet(config)
-        self.map_net = MapNet(config)
+        self.actor_net = ActorNet(config)  # 初始化 ActorNet
+        self.map_net = MapNet(config)  # 初始化 MapNet
 
-        self.a2m = A2M(config)
-        self.m2m = M2M(config)
-        self.m2a = M2A(config)
-        self.a2a = A2A(config)
+        self.a2m = A2M(config)  # 初始化 Actor 到 Map 的融合模块
+        self.m2m = M2M(config)  # 初始化 Map 到 Map 的融合模块
+        self.m2a = M2A(config)  # 初始化 Map 到 Actor 的融合模块
+        self.a2a = A2A(config)  # 初始化 Actor 到 Actor 的融合模块
 
-        self.pred_net = PredNet(config)
+        self.pred_net = PredNet(config)  # 初始化预测模块
 
     def forward(self, data: Dict) -> Dict[str, List[Tensor]]:
-        # construct actor feature
-        actors, actor_idcs = actor_gather(gpu(data["feats"]))
-        actor_ctrs = gpu(data["ctrs"])
-        actors = self.actor_net(actors)
+        """
+        前向传播函数。
+        :param data: 输入数据字典，包含轨迹、地图等信息。
+        :return: 输出字典，包含分类和回归结果。
+        """
+        # 构造 Actor 特征
+        actors, actor_idcs = actor_gather(gpu(data["feats"]))  # 聚合批次车辆特征 [total_actors, seq_len, 2]
+        actor_ctrs = gpu(data["ctrs"])                         # 车辆中心坐标 [total_actors, 2]
+        actors = self.actor_net(actors)                        # 提取车辆特征 [total_actors, n_actor]
 
-        # construct map features
-        graph = graph_gather(to_long(gpu(data["graph"])))
-        nodes, node_idcs, node_ctrs = self.map_net(graph)
+        # 构造地图特征
+        graph = graph_gather(to_long(gpu(data["graph"])))      # 聚合地图图结构
+        nodes, node_idcs, node_ctrs = self.map_net(graph)      # 提取地图特征 [total_nodes, n_map]
 
-        # actor-map fusion cycle 
-        nodes = self.a2m(nodes, graph, actors, actor_idcs, actor_ctrs)
-        nodes = self.m2m(nodes, graph)
-        actors = self.m2a(actors, actor_idcs, actor_ctrs, nodes, node_idcs, node_ctrs)
-        actors = self.a2a(actors, actor_idcs, actor_ctrs)
+        # Actor-Map 融合循环
+        nodes = self.a2m(nodes, graph, actors, actor_idcs, actor_ctrs)  # Actor 到 Map 融合
+        nodes = self.m2m(nodes, graph)  # Map 到 Map 融合
+        actors = self.m2a(actors, actor_idcs, actor_ctrs, nodes, node_idcs, node_ctrs)  # Map 到 Actor 融合
+        actors = self.a2a(actors, actor_idcs, actor_ctrs)  # Actor 到 Actor 融合
 
-        # prediction
-        out = self.pred_net(actors, actor_idcs, actor_ctrs)
-        rot, orig = gpu(data["rot"]), gpu(data["orig"])
-        # transform prediction to world coordinates
+        # 预测
+        out = self.pred_net(actors, actor_idcs, actor_ctrs)  # 预测未来轨迹
+        rot, orig = gpu(data["rot"]), gpu(data["orig"])  # 获取旋转矩阵和原点
+        # 将预测结果转换到世界坐标系
         for i in range(len(out["reg"])):
-            out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(
-                1, 1, 1, -1
-            )
+            out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(1, 1, 1, -1)
         return out
 
 
-
 def actor_gather(actors: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
-    batch_size = len(actors)
-    num_actors = [len(x) for x in actors]
+    """
+    收集 Actor 特征。
+    :param actors: 每个批次的 Actor 特征列表。
+    :return: 合并的 Actor 特征张量和索引列表。
+    """
+    batch_size = len(actors)  # 批次大小
+    num_actors = [len(x) for x in actors]  # 每个批次中的 Actor 数量
 
-    actors = [x.transpose(1, 2) for x in actors]
-    actors = torch.cat(actors, 0)
+    actors = [x.transpose(1, 2) for x in actors]  # 转置特征维度
+    actors = torch.cat(actors, 0)  # 合并所有批次的 Actor 特征
 
     actor_idcs = []
     count = 0
     for i in range(batch_size):
-        idcs = torch.arange(count, count + num_actors[i]).to(actors.device)
+        idcs = torch.arange(count, count + num_actors[i]).to(actors.device)  # 生成索引
         actor_idcs.append(idcs)
         count += num_actors[i]
     return actors, actor_idcs
 
 
 def graph_gather(graphs):
-    batch_size = len(graphs)
+    """
+    收集地图图结构。
+    :param graphs: 每个批次的地图图结构列表。
+    :return: 合并的地图图结构。
+    """
+    batch_size = len(graphs)  # 批次大小
     node_idcs = []
     count = 0
     counts = []
     for i in range(batch_size):
         counts.append(count)
-        idcs = torch.arange(count, count + graphs[i]["num_nodes"]).to(
-            graphs[i]["feats"].device
-        )
+        idcs = torch.arange(count, count + graphs[i]["num_nodes"]).to(graphs[i]["feats"].device)  # 生成节点索引
         node_idcs.append(idcs)
         count = count + graphs[i]["num_nodes"]
 
@@ -186,34 +204,34 @@ def graph_gather(graphs):
     graph["ctrs"] = [x["ctrs"] for x in graphs]
 
     for key in ["feats", "turn", "control", "intersect"]:
-        graph[key] = torch.cat([x[key] for x in graphs], 0)
+        graph[key] = torch.cat([x[key] for x in graphs], 0)  # 合并特征
 
     for k1 in ["pre", "suc"]:
         graph[k1] = []
         for i in range(len(graphs[0]["pre"])):
             graph[k1].append(dict())
             for k2 in ["u", "v"]:
-                graph[k1][i][k2] = torch.cat(
-                    [graphs[j][k1][i][k2] + counts[j] for j in range(batch_size)], 0
-                )
+                graph[k1][i][k2] = torch.cat([graphs[j][k1][i][k2] + counts[j] for j in range(batch_size)], 0)
 
     for k1 in ["left", "right"]:
         graph[k1] = dict()
         for k2 in ["u", "v"]:
             temp = [graphs[i][k1][k2] + counts[i] for i in range(batch_size)]
-            temp = [
-                x if x.dim() > 0 else graph["pre"][0]["u"].new().resize_(0)
-                for x in temp
-            ]
+            temp = [x if x.dim() > 0 else graph["pre"][0]["u"].new().resize_(0) for x in temp]
             graph[k1][k2] = torch.cat(temp)
     return graph
 
 
 class ActorNet(nn.Module):
     """
-    Actor feature extractor with Conv1D
+    Actor 特征提取器，使用 1D 卷积网络。
     """
+
     def __init__(self, config):
+        """
+        初始化 ActorNet。
+        :param config: 配置字典，包含模型参数。
+        """
         super(ActorNet, self).__init__()
         self.config = config
         norm = "GN"
@@ -224,6 +242,7 @@ class ActorNet(nn.Module):
         blocks = [Res1d, Res1d, Res1d]
         num_blocks = [2, 2, 2]
 
+        ######! 多层(3)残差卷积块 #####
         groups = []
         for i in range(len(num_blocks)):
             group = []
@@ -238,6 +257,7 @@ class ActorNet(nn.Module):
             n_in = n_out[i]
         self.groups = nn.ModuleList(groups)
 
+        ######! 特征融合层 #####
         n = config["n_actor"]
         lateral = []
         for i in range(len(n_out)):
@@ -247,27 +267,39 @@ class ActorNet(nn.Module):
         self.output = Res1d(n, n, norm=norm, ng=ng)
 
     def forward(self, actors: Tensor) -> Tensor:
+        """
+        前向传播函数。
+        :param actors: 输入的 Actor 特征张量。
+        :return: 提取后的 Actor 特征张量。
+        """
         out = actors
 
         outputs = []
+        # 通过各卷积层
         for i in range(len(self.groups)):
-            out = self.groups[i](out)
+            out = self.groups[i](out)  # 通过残差卷积块
             outputs.append(out)
 
-        out = self.lateral[-1](outputs[-1])
+        # 特征融合
+        out = self.lateral[-1](outputs[-1])  # 最后一层特征
         for i in range(len(outputs) - 2, -1, -1):
-            out = F.interpolate(out, scale_factor=2, mode="linear", align_corners=False)
-            out += self.lateral[i](outputs[i])
+            out = F.interpolate(out, scale_factor=2, mode="linear", align_corners=False)  # 上采样
+            out += self.lateral[i](outputs[i])  # 融合特征
 
-        out = self.output(out)[:, :, -1]
+        out = self.output(out)[:, :, -1]  # 输出最后一维特征  [num_actors, n_actor]
         return out
 
 
 class MapNet(nn.Module):
     """
-    Map Graph feature extractor with LaneGraphCNN
+    Map Graph 特征提取器，使用 LaneGraphCNN。
     """
+
     def __init__(self, config):
+        """
+        初始化 MapNet。
+        :param config: 配置字典，包含模型参数。
+        """
         super(MapNet, self).__init__()
         self.config = config
         n_map = config["n_map"]
@@ -309,11 +341,12 @@ class MapNet(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, graph):
-        if (
-            len(graph["feats"]) == 0
-            or len(graph["pre"][-1]["u"]) == 0
-            or len(graph["suc"][-1]["u"]) == 0
-        ):
+        """
+        前向传播函数。
+        :param graph: 输入的地图图结构。
+        :return: 提取后的地图特征张量、节点索引和中心点。
+        """
+        if len(graph["feats"]) == 0 or len(graph["pre"][-1]["u"]) == 0 or len(graph["suc"][-1]["u"]) == 0:
             temp = graph["feats"]
             return (
                 temp.new().resize_(0),
@@ -368,6 +401,7 @@ class A2M(nn.Module):
     Actor to Map Fusion:  fuses real-time traffic information from
     actor nodes to lane nodes
     """
+
     def __init__(self, config):
         super(A2M, self).__init__()
         self.config = config
@@ -382,7 +416,14 @@ class A2M(nn.Module):
             att.append(Att(n_map, config["n_actor"]))
         self.att = nn.ModuleList(att)
 
-    def forward(self, feat: Tensor, graph: Dict[str, Union[List[Tensor], Tensor, List[Dict[str, Tensor]], Dict[str, Tensor]]], actors: Tensor, actor_idcs: List[Tensor], actor_ctrs: List[Tensor]) -> Tensor:
+    def forward(
+        self,
+        feat: Tensor,
+        graph: Dict[str, Union[List[Tensor], Tensor, List[Dict[str, Tensor]], Dict[str, Tensor]]],
+        actors: Tensor,
+        actor_idcs: List[Tensor],
+        actor_ctrs: List[Tensor],
+    ) -> Tensor:
         """meta, static and dyn fuse using attention"""
         meta = torch.cat(
             (
@@ -412,6 +453,7 @@ class M2M(nn.Module):
     The lane to lane block: propagates information over lane
             graphs and updates the features of lane nodes
     """
+
     def __init__(self, config):
         super(M2M, self).__init__()
         self.config = config
@@ -485,6 +527,7 @@ class M2A(nn.Module):
     The lane to actor block fuses updated
         map information from lane nodes to actor nodes
     """
+
     def __init__(self, config):
         super(M2A, self).__init__()
         self.config = config
@@ -499,7 +542,9 @@ class M2A(nn.Module):
             att.append(Att(n_actor, n_map))
         self.att = nn.ModuleList(att)
 
-    def forward(self, actors: Tensor, actor_idcs: List[Tensor], actor_ctrs: List[Tensor], nodes: Tensor, node_idcs: List[Tensor], node_ctrs: List[Tensor]) -> Tensor:
+    def forward(
+        self, actors: Tensor, actor_idcs: List[Tensor], actor_ctrs: List[Tensor], nodes: Tensor, node_idcs: List[Tensor], node_ctrs: List[Tensor]
+    ) -> Tensor:
         for i in range(len(self.att)):
             actors = self.att[i](
                 actors,
@@ -517,6 +562,7 @@ class A2A(nn.Module):
     """
     The actor to actor block performs interactions among actors.
     """
+
     def __init__(self, config):
         super(A2A, self).__init__()
         self.config = config
@@ -576,6 +622,7 @@ class PredNet(nn.Module):
     """
     Final motion forecasting with Linear Residual block
     """
+
     def __init__(self, config):
         super(PredNet, self).__init__()
         self.config = config
@@ -595,9 +642,7 @@ class PredNet(nn.Module):
         self.pred = nn.ModuleList(pred)
 
         self.att_dest = AttDest(n_actor)
-        self.cls = nn.Sequential(
-            LinearRes(n_actor, n_actor, norm=norm, ng=ng), nn.Linear(n_actor, 1)
-        )
+        self.cls = nn.Sequential(LinearRes(n_actor, n_actor, norm=norm, ng=ng), nn.Linear(n_actor, 1))
 
     def forward(self, actors: Tensor, actor_idcs: List[Tensor], actor_ctrs: List[Tensor]) -> Dict[str, List[Tensor]]:
         preds = []
@@ -635,19 +680,36 @@ class Att(nn.Module):
     """
     Attention block to pass context nodes information to target nodes
     This is used in Actor2Map, Actor2Actor, Map2Actor and Map2Map
+    
+    功能：注意力机制模块（用于A2M/M2A等）
+    实现原理：
+    1. 计算query与context节点的空间关系
+    2. 通过可学习参数融合空间关系和特征
+    3. 使用index_add进行高效的特征聚合
+
+    输入输出：
+    输入:
+        agts (Tensor): 目标节点特征 [num_agts, feat_dim]
+        ctx (Tensor): 上下文节点特征 [num_ctx, feat_dim]
+        空间坐标信息等
+    输出:
+        Tensor - 更新后的目标节点特征 [num_agts, feat_dim]
     """
+
     def __init__(self, n_agt: int, n_ctx: int) -> None:
         super(Att, self).__init__()
         norm = "GN"
         ng = 1
 
+        # 空间编码层
         self.dist = nn.Sequential(
-            nn.Linear(2, n_ctx),
+            nn.Linear(2, n_ctx),  # 将相对坐标映射到高维
             nn.ReLU(inplace=True),
             Linear(n_ctx, n_ctx, norm=norm, ng=ng),
         )
 
-        self.query = Linear(n_agt, n_ctx, norm=norm, ng=ng)
+        # 注意力计算层
+        self.query = Linear(n_agt, n_ctx, norm=norm, ng=ng) # 将目标特征转换为query
 
         self.ctx = nn.Sequential(
             Linear(3 * n_ctx, n_agt, norm=norm, ng=ng),
@@ -659,7 +721,16 @@ class Att(nn.Module):
         self.linear = Linear(n_agt, n_agt, norm=norm, ng=ng, act=False)
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, agts: Tensor, agt_idcs: List[Tensor], agt_ctrs: List[Tensor], ctx: Tensor, ctx_idcs: List[Tensor], ctx_ctrs: List[Tensor], dist_th: float) -> Tensor:
+    def forward(
+        self,
+        agts: Tensor,
+        agt_idcs: List[Tensor],
+        agt_ctrs: List[Tensor],
+        ctx: Tensor,
+        ctx_idcs: List[Tensor],
+        ctx_ctrs: List[Tensor],
+        dist_th: float,
+    ) -> Tensor:
         res = agts
         if len(ctx) == 0:
             agts = self.agt(agts)
@@ -669,13 +740,14 @@ class Att(nn.Module):
             agts = self.relu(agts)
             return agts
 
+        # 计算节点间距离
         batch_size = len(agt_idcs)
         hi, wi = [], []
         hi_count, wi_count = 0, 0
         for i in range(batch_size):
             dist = agt_ctrs[i].view(-1, 1, 2) - ctx_ctrs[i].view(1, -1, 2)
-            dist = torch.sqrt((dist ** 2).sum(2))
-            mask = dist <= dist_th
+            dist = torch.sqrt((dist**2).sum(2))
+            mask = dist <= dist_th  # 基于距离阈值筛选相邻节点
 
             idcs = torch.nonzero(mask, as_tuple=False)
             if len(idcs) == 0:
@@ -760,9 +832,7 @@ class PredLoss(nn.Module):
         num_mods, num_preds = self.config["num_mods"], self.config["num_preds"]
         # assert(has_preds.all())
 
-        last = has_preds.float() + 0.1 * torch.arange(num_preds).float().to(
-            has_preds.device
-        ) / float(num_preds)
+        last = has_preds.float() + 0.1 * torch.arange(num_preds).float().to(has_preds.device) / float(num_preds)
         max_last, last_idcs = last.max(1)
         mask = max_last > 1.0
 
@@ -775,14 +845,7 @@ class PredLoss(nn.Module):
         row_idcs = torch.arange(len(last_idcs)).long().to(last_idcs.device)
         dist = []
         for j in range(num_mods):
-            dist.append(
-                torch.sqrt(
-                    (
-                        (reg[row_idcs, j, last_idcs] - gt_preds[row_idcs, last_idcs])
-                        ** 2
-                    ).sum(1)
-                )
-            )
+            dist.append(torch.sqrt(((reg[row_idcs, j, last_idcs] - gt_preds[row_idcs, last_idcs]) ** 2).sum(1)))
         dist = torch.cat([x.unsqueeze(1) for x in dist], 1)
         min_dist, min_idcs = dist.min(1)
         row_idcs = torch.arange(len(min_idcs)).long().to(min_idcs.device)
@@ -793,16 +856,12 @@ class PredLoss(nn.Module):
         mgn = mgn[mask0 * mask1]
         mask = mgn < self.config["mgn"]
         coef = self.config["cls_coef"]
-        loss_out["cls_loss"] += coef * (
-            self.config["mgn"] * mask.sum() - mgn[mask].sum()
-        )
+        loss_out["cls_loss"] += coef * (self.config["mgn"] * mask.sum() - mgn[mask].sum())
         loss_out["num_cls"] += mask.sum().item()
 
         reg = reg[row_idcs, min_idcs]
         coef = self.config["reg_coef"]
-        loss_out["reg_loss"] += coef * self.reg_loss(
-            reg[has_preds], gt_preds[has_preds]
-        )
+        loss_out["reg_loss"] += coef * self.reg_loss(reg[has_preds], gt_preds[has_preds])
         loss_out["num_reg"] += has_preds.sum().item()
         return loss_out
 
@@ -815,9 +874,7 @@ class Loss(nn.Module):
 
     def forward(self, out: Dict, data: Dict) -> Dict:
         loss_out = self.pred_loss(out, gpu(data["gt_preds"]), gpu(data["has_preds"]))
-        loss_out["loss"] = loss_out["cls_loss"] / (
-            loss_out["num_cls"] + 1e-10
-        ) + loss_out["reg_loss"] / (loss_out["num_reg"] + 1e-10)
+        loss_out["loss"] = loss_out["cls_loss"] / (loss_out["num_cls"] + 1e-10) + loss_out["reg_loss"] / (loss_out["num_reg"] + 1e-10)
         return loss_out
 
 
@@ -826,14 +883,14 @@ class PostProcess(nn.Module):
         super(PostProcess, self).__init__()
         self.config = config
 
-    def forward(self, out,data):
+    def forward(self, out, data):
         post_out = dict()
         post_out["preds"] = [x[0:1].detach().cpu().numpy() for x in out["reg"]]
         post_out["gt_preds"] = [x[0:1].numpy() for x in data["gt_preds"]]
         post_out["has_preds"] = [x[0:1].numpy() for x in data["has_preds"]]
         return post_out
 
-    def append(self, metrics: Dict, loss_out: Dict, post_out: Optional[Dict[str, List[ndarray]]]=None) -> Dict:
+    def append(self, metrics: Dict, loss_out: Dict, post_out: Optional[Dict[str, List[ndarray]]] = None) -> Dict:
         if len(metrics.keys()) == 0:
             for key in loss_out:
                 if key != "loss":
@@ -859,10 +916,7 @@ class PostProcess(nn.Module):
         if lr is not None:
             print("Epoch %3.3f, lr %.5f, time %3.2f" % (epoch, lr, dt))
         else:
-            print(
-                "************************* Validation, time %3.2f *************************"
-                % dt
-            )
+            print("************************* Validation, time %3.2f *************************" % dt)
 
         cls = metrics["cls_loss"] / (metrics["num_cls"] + 1e-10)
         reg = metrics["reg_loss"] / (metrics["num_reg"] + 1e-10)
@@ -873,10 +927,7 @@ class PostProcess(nn.Module):
         has_preds = np.concatenate(metrics["has_preds"], 0)
         ade1, fde1, ade, fde, min_idcs = pred_metrics(preds, gt_preds, has_preds)
 
-        print(
-            "loss %2.4f %2.4f %2.4f, ade1 %2.4f, fde1 %2.4f, ade %2.4f, fde %2.4f"
-            % (loss, cls, reg, ade1, fde1, ade, fde)
-        )
+        print("loss %2.4f %2.4f %2.4f, ade1 %2.4f, fde1 %2.4f, ade %2.4f, fde %2.4f" % (loss, cls, reg, ade1, fde1, ade, fde))
         print()
 
 
@@ -908,6 +959,5 @@ def get_model():
 
     params = net.parameters()
     opt = Optimizer(params, config)
-
 
     return config, ArgoDataset, collate_fn, net, loss, post_process, opt
