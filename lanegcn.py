@@ -2,18 +2,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+from datetime import datetime
+from importlib import import_module
 import numpy as np
 import os
 import sys
-from fractions import gcd
+
+# from fractions import gcd
+from math import gcd
 from numbers import Number
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from data import ArgoDataset, collate_fn
-from utils import gpu, to_long, Optimizer, StepLR
+# from data import ArgoDataset, collate_fn
+from utils import gpu, to_long, StepLR
+
+# from utils import gpu, to_long, Optimizer, StepLR
 
 from layers import Conv1d, Res1d, Linear, LinearRes, Null
 from numpy import float64, ndarray
@@ -89,12 +96,12 @@ class Net(nn.Module):
         1. ActorNet: a 1D CNN to process the trajectory input
         2. MapNet: LaneGraphCNN to learn structured map representations from vectorized map data
         3. Actor-Map Fusion Cycle: fuse the information between actor nodes and lane nodes:
-            a. A2M: introduces real-time traffic information to lane nodes, such as blockage or usage of the lanes 
+            a. A2M: introduces real-time traffic information to lane nodes, such as blockage or usage of the lanes
             b. M2M:  updates lane node features by propagating the traffic information over lane graphs
             c. M2A: fuses updated map features with real-time traffic information back to actors
             d. A2A: handles the interaction between actors and produces the output actor features
         4. PredNet: prediction header for motion forecasting using feature from A2A
-        
+
     Lane Graph Network 包含以下组件：
         1. ActorNet：一个 1D CNN，用于处理轨迹输入
         2. MapNet：LaneGraphCNN 从矢量化地图数据中学习结构化地图表示
@@ -104,7 +111,7 @@ class Net(nn.Module):
             c. M2A：将更新的地图功能与实时交通信息融合在一起，返回给参与者
             d. A2A：处理 Actor 之间的交互并生成输出 Actor 特征
         4. PredNet：使用 A2A 功能进行运动预测的预测标头
-        
+
     LaneGCN 轨迹预测模型：
         核心功能：通过融合车辆轨迹特征与高精度地图特征，实现多模态轨迹预测
         主要组成部分：
@@ -132,7 +139,7 @@ class Net(nn.Module):
 
         self.pred_net = PredNet(config)  # 初始化预测模块
 
-    def forward(self, data: Dict) -> Dict[str, List[Tensor]]:
+    def forward222222(self, data: Dict) -> Dict[str, List[Tensor]]:
         """
         前向传播函数。
         :param data: 输入数据字典，包含轨迹、地图等信息。
@@ -140,12 +147,12 @@ class Net(nn.Module):
         """
         # 构造 Actor 特征
         actors, actor_idcs = actor_gather(gpu(data["feats"]))  # 聚合批次车辆特征 [total_actors, seq_len, 2]
-        actor_ctrs = gpu(data["ctrs"])                         # 车辆中心坐标 [total_actors, 2]
-        actors = self.actor_net(actors)                        # 提取车辆特征 [total_actors, n_actor]
+        actor_ctrs = gpu(data["ctrs"])  # 车辆中心坐标 [total_actors, 2]
+        actors = self.actor_net(actors)  # 提取车辆特征 [total_actors, n_actor]
 
         # 构造地图特征
-        graph = graph_gather(to_long(gpu(data["graph"])))      # 聚合地图图结构
-        nodes, node_idcs, node_ctrs = self.map_net(graph)      # 提取地图特征 [total_nodes, n_map]
+        graph = graph_gather(to_long(gpu(data["graph"])))  # 聚合地图图结构
+        nodes, node_idcs, node_ctrs = self.map_net(graph)  # 提取地图特征 [total_nodes, n_map]
 
         # Actor-Map 融合循环
         nodes = self.a2m(nodes, graph, actors, actor_idcs, actor_ctrs)  # Actor 到 Map 融合
@@ -159,6 +166,42 @@ class Net(nn.Module):
         # 将预测结果转换到世界坐标系
         for i in range(len(out["reg"])):
             out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(1, 1, 1, -1)
+        return out
+
+    # "feats", "ctrs", "graph", "rot", "orig"
+    def forward(self, feats, ctrs, graph, rot, orig) -> Dict[str, List[Tensor]]:
+        """
+        前向传播函数。
+        :param data: 输入数据字典，包含轨迹、地图等信息。
+        :return: 输出字典，包含分类和回归结果。
+        """
+        # 构造 Actor 特征
+        actors, actor_idcs = actor_gather(feats)  # 聚合批次车辆特征 [total_actors, seq_len, 2]
+        actor_ctrs = ctrs  # 车辆中心坐标 [total_actors, 2]
+        actors = self.actor_net(actors)  # 提取车辆特征 [total_actors, n_actor]
+
+        # 构造地图特征
+        graph = graph_gather(to_long(graph))  # 聚合地图图结构
+        nodes, node_idcs, node_ctrs = self.map_net(graph)  # 提取地图特征 [total_nodes, n_map]
+
+        # Actor-Map 融合循环
+        nodes = self.a2m(nodes, graph, actors, actor_idcs, actor_ctrs)  # Actor 到 Map 融合
+        nodes = self.m2m(nodes, graph)  # Map 到 Map 融合
+        actors = self.m2a(actors, actor_idcs, actor_ctrs, nodes, node_idcs, node_ctrs)  # Map 到 Actor 融合
+        actors = self.a2a(actors, actor_idcs, actor_ctrs)  # Actor 到 Actor 融合
+
+        # 预测
+        out = self.pred_net(actors, actor_idcs, actor_ctrs)  # 预测未来轨迹
+        # rot, orig = gpu(data["rot"]), gpu(data["orig"])  # 获取旋转矩阵和原点
+        # 将预测结果转换到世界坐标系
+        # 修改前
+        # for i in range(len(out["reg"])):
+        #     out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(1, 1, 1, -1)
+
+        # 修改后（假设rot/orig是单批次输入）
+        for i in range(len(out["reg"])):
+            # 使用索引0获取当前批次的旋转矩阵和原点
+            out["reg"][i] = torch.matmul(out["reg"][i], rot[0]) + orig[0].view(1, 1, 1, -1)
         return out
 
 
@@ -193,18 +236,24 @@ def graph_gather(graphs):
     node_idcs = []
     count = 0
     counts = []
-    for i in range(batch_size):
+    for i in range(batch_size):  # 遍历批次   batch_size = 10
         counts.append(count)
-        idcs = torch.arange(count, count + graphs[i]["num_nodes"]).to(graphs[i]["feats"].device)  # 生成节点索引
+        idcs = torch.arange(count, count + graphs[i]["num_nodes"]).to(graphs[i]["feats"][0].device)  # 生成节点索引
         node_idcs.append(idcs)
         count = count + graphs[i]["num_nodes"]
 
     graph = dict()
     graph["idcs"] = node_idcs
-    graph["ctrs"] = [x["ctrs"] for x in graphs]
+    # 修改前
+    # graph["ctrs"] = [x["ctrs"] for x in graphs]
+    # 修改后（直接拼接张量）
+    graph["ctrs"] = torch.cat([x["ctrs"] for x in graphs], 0)
 
     for key in ["feats", "turn", "control", "intersect"]:
         graph[key] = torch.cat([x[key] for x in graphs], 0)  # 合并特征
+
+    # 添加必要字段的默认值
+    graph["num_nodes"] = sum(x["num_nodes"] for x in graphs)
 
     for k1 in ["pre", "suc"]:
         graph[k1] = []
@@ -311,11 +360,7 @@ class MapNet(nn.Module):
             nn.ReLU(inplace=True),
             Linear(n_map, n_map, norm=norm, ng=ng, act=False),
         )
-        self.seg = nn.Sequential(
-            nn.Linear(2, n_map),
-            nn.ReLU(inplace=True),
-            Linear(n_map, n_map, norm=norm, ng=ng, act=False),
-        )
+        self.seg = nn.Sequential(nn.Linear(2, n_map), nn.ReLU(inplace=True), Linear(n_map, n_map, norm=norm, ng=ng, act=False))
 
         keys = ["ctr", "norm", "ctr2", "left", "right"]
         for i in range(config["num_scales"]):
@@ -329,7 +374,10 @@ class MapNet(nn.Module):
         for i in range(4):
             for key in fuse:
                 if key in ["norm"]:
-                    fuse[key].append(nn.GroupNorm(gcd(ng, n_map), n_map))
+                    # 修改前（lanegcn.py MapNet部分）
+                    # fuse[key].append(nn.GroupNorm(gcd(ng, n_map), n_map))
+                    # 修改后（显式设置num_groups=1）
+                    fuse[key].append(nn.GroupNorm(1, n_map))  # 强制分组数为1
                 elif key in ["ctr2"]:
                     fuse[key].append(Linear(n_map, n_map, norm=norm, ng=ng, act=False))
                 else:
@@ -354,7 +402,22 @@ class MapNet(nn.Module):
                 temp.new().resize_(0),
             )
 
-        ctrs = torch.cat(graph["ctrs"], 0)
+        # 修改前
+        # ctrs = torch.cat(graph["ctrs"], 0)
+        # 修改后（直接使用已拼接的张量）
+        ctrs = graph["ctrs"]
+        # ctrs = graph["ctrs"][0] # 直接使用张量，无需拼接
+        # ctrs= tensor([[-0.6442, -1.4949],
+        # [-0.7099, -0.2203],
+        # [-0.7556, -0.3917],
+        # [-0.2461, -1.0954],
+        # [-1.2916, -0.1463],
+        # [-0.2244, -1.4459],
+        # [ 2.3021, -0.4143],
+        # [-1.3379,  1.4924],
+        # [ 0.0618,  1.5568],
+        # [-0.3918,  0.9325],
+        # [ 0.7887,  0.9624]], device='cuda:0')
         feat = self.input(ctrs)
         feat += self.seg(graph["feats"])
         feat = self.relu(feat)
@@ -473,7 +536,10 @@ class M2M(nn.Module):
         for i in range(4):
             for key in fuse:
                 if key in ["norm"]:
-                    fuse[key].append(nn.GroupNorm(gcd(ng, n_map), n_map))
+                    # 修改前（lanegcn.py MapNet部分）
+                    # fuse[key].append(nn.GroupNorm(gcd(ng, n_map), n_map))
+                    # 修改后（显式设置num_groups=1）
+                    fuse[key].append(nn.GroupNorm(1, n_map))  # 强制分组数为1
                 elif key in ["ctr2"]:
                     fuse[key].append(Linear(n_map, n_map, norm=norm, ng=ng, act=False))
                 else:
@@ -543,7 +609,13 @@ class M2A(nn.Module):
         self.att = nn.ModuleList(att)
 
     def forward(
-        self, actors: Tensor, actor_idcs: List[Tensor], actor_ctrs: List[Tensor], nodes: Tensor, node_idcs: List[Tensor], node_ctrs: List[Tensor]
+        self,
+        actors: Tensor,
+        actor_idcs: List[Tensor],
+        actor_ctrs: List[Tensor],
+        nodes: Tensor,
+        node_idcs: List[Tensor],
+        node_ctrs: List[Tensor],
     ) -> Tensor:
         for i in range(len(self.att)):
             actors = self.att[i](
@@ -667,12 +739,20 @@ class PredNet(nn.Module):
         reg = reg[row_idcs, sort_idcs].view(cls.size(0), cls.size(1), -1, 2)
 
         out = dict()
-        out["cls"], out["reg"] = [], []
-        for i in range(len(actor_idcs)):
+        # out["cls"], out["reg"] = [], []
+        out["reg"] = []
+        # for i in range(len(actor_idcs)):
+        #     idcs = actor_idcs[i]
+        #     ctrs = actor_ctrs[i].view(-1, 1, 1, 2)
+        #     out["cls"].append(cls[idcs])
+        #     out["reg"].append(reg[idcs])
+
+        # 修改后（确保输出与输入批次一致）
+        batch_size = len(actor_idcs)
+        for i in range(batch_size):
             idcs = actor_idcs[i]
-            ctrs = actor_ctrs[i].view(-1, 1, 1, 2)
-            out["cls"].append(cls[idcs])
             out["reg"].append(reg[idcs])
+
         return out
 
 
@@ -680,7 +760,7 @@ class Att(nn.Module):
     """
     Attention block to pass context nodes information to target nodes
     This is used in Actor2Map, Actor2Actor, Map2Actor and Map2Map
-    
+
     功能：注意力机制模块（用于A2M/M2A等）
     实现原理：
     1. 计算query与context节点的空间关系
@@ -709,7 +789,7 @@ class Att(nn.Module):
         )
 
         # 注意力计算层
-        self.query = Linear(n_agt, n_ctx, norm=norm, ng=ng) # 将目标特征转换为query
+        self.query = Linear(n_agt, n_ctx, norm=norm, ng=ng)  # 将目标特征转换为query
 
         self.ctx = nn.Sequential(
             Linear(3 * n_ctx, n_agt, norm=norm, ng=ng),
@@ -760,8 +840,12 @@ class Att(nn.Module):
         hi = torch.cat(hi, 0)
         wi = torch.cat(wi, 0)
 
-        agt_ctrs = torch.cat(agt_ctrs, 0)
-        ctx_ctrs = torch.cat(ctx_ctrs, 0)
+        # agt_ctrs = torch.cat(agt_ctrs, 0)
+        # ctx_ctrs = torch.cat(ctx_ctrs, 0)
+        # 修改后：确保输入是列表形式再拼接
+        agt_ctrs = torch.cat(agt_ctrs, dim=0) if isinstance(agt_ctrs, (list, tuple)) else agt_ctrs
+        ctx_ctrs = torch.cat(ctx_ctrs, dim=0) if isinstance(ctx_ctrs, (list, tuple)) else ctx_ctrs
+
         dist = agt_ctrs[hi] - ctx_ctrs[wi]
         dist = self.dist(dist)
 
@@ -815,7 +899,12 @@ class PredLoss(nn.Module):
         self.config = config
         self.reg_loss = nn.SmoothL1Loss(reduction="sum")
 
-    def forward(self, out: Dict[str, List[Tensor]], gt_preds: List[Tensor], has_preds: List[Tensor]) -> Dict[str, Union[Tensor, int]]:
+    def forward(
+        self,
+        out: Dict[str, List[Tensor]],
+        gt_preds: List[Tensor],
+        has_preds: List[Tensor],
+    ) -> Dict[str, Union[Tensor, int]]:
         cls, reg = out["cls"], out["reg"]
         cls = torch.cat([x for x in cls], 0)
         reg = torch.cat([x for x in reg], 0)
@@ -890,7 +979,12 @@ class PostProcess(nn.Module):
         post_out["has_preds"] = [x[0:1].numpy() for x in data["has_preds"]]
         return post_out
 
-    def append(self, metrics: Dict, loss_out: Dict, post_out: Optional[Dict[str, List[ndarray]]] = None) -> Dict:
+    def append(
+        self,
+        metrics: Dict,
+        loss_out: Dict,
+        post_out: Optional[Dict[str, List[ndarray]]] = None,
+    ) -> Dict:
         if len(metrics.keys()) == 0:
             for key in loss_out:
                 if key != "loss":
@@ -954,10 +1048,222 @@ def get_model():
     net = Net(config)
     net = net.cuda()
 
-    loss = Loss(config).cuda()
-    post_process = PostProcess(config).cuda()
+    # loss = Loss(config).cuda()
+    # post_process = PostProcess(config).cuda()
 
-    params = net.parameters()
-    opt = Optimizer(params, config)
+    # params = net.parameters()
+    # opt = Optimizer(params, config)
 
-    return config, ArgoDataset, collate_fn, net, loss, post_process, opt
+    # return config, ArgoDataset, collate_fn, net, loss, post_process, opt
+    return net
+
+    # def export_onnx(net: Net, device, dir_cache="./cache", data_in=None):
+    #     os.makedirs(dir_cache, exist_ok=True)
+
+    #     # 创建符合网络结构  dumy
+
+    #     with torch.no_grad():
+    #         test_output = net(
+    #             actors=dummy_actors,
+    #             actor_idcs=dummy_actor_idcs,
+    #             lanes=dummy_maps,
+    #             lane_idcs=dummy_map_idcs,
+    #             rpe=dummy_rpe,
+    #         )
+    #         print("验证输出维度:", [t.shape for t in test_output[0][0]])
+
+    #     # 导出ONNX模型
+    #     time_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+    #     onnx_path = os.path.join(dir_cache, f"net_mtp_{time_str}.onnx")
+
+    #     torch.onnx.export(
+    #         net,
+    #         (dummy_actors, dummy_actor_idcs, dummy_maps, dummy_map_idcs, dummy_rpe),
+    #         onnx_path,
+    #         input_names=["actors", "actor_idcs", "lanes", "lane_idcs", "rpe"],
+    #         output_names=["cls", "reg", "aux"],
+    #         dynamic_axes={
+    #             "actors": {0: "num_actors"},
+    #             "lanes": {0: "num_lanes"},
+    #             "cls": {0: "batch_size"},
+    #             "reg": {0: "batch_size"},
+    #         },
+    #         opset_version=14,
+    #         do_constant_folding=True,
+    #     )
+    # print(f"ONNX模型已保存至: {onnx_path}")
+
+
+def export_onnx(net: Net, device, output_path="lanegcn.onnx"):
+    """
+    Export LaneGCN model to ONNX format
+    实现要点：
+    1. 构造符合网络输入的虚拟数据
+    2. 处理动态维度（如可变数量的actors/nodes）
+    3. 保留必要特征处理逻辑
+    """
+
+    # 构造虚拟输入数据
+    batch_size = 1
+    num_actors = 8  # 示例车辆数
+    seq_len = 20  # 轨迹序列长度
+    num_nodes = 11  # 示例地图节点数
+
+    # dummy_data = {
+    #     "feats": [torch.randn(num_actors, seq_len, 3, device=device.type)],
+    #     "ctrs": [torch.randn(num_actors, 2, device=device.type)],
+    #     "graph": [
+    #         {
+    #             "ctrs": torch.randn(num_nodes, 2, device=device.type),
+    #             "feats": torch.randn(num_nodes, 2, device=device.type),
+    #             "turn": torch.randn(num_nodes, 2, device=device.type),
+    #             "control": torch.randint(0, 2, (num_nodes,), device=device.type),
+    #             "intersect": torch.randint(0, 2, (num_nodes,), device=device.type),
+    #             "pre": [
+    #                 {"u": torch.tensor([0], device=device.type), "v": torch.tensor([1], device=device.type)},
+    #             ],
+    #             "suc": [{"u": torch.tensor([1], device=device.type), "v": torch.tensor([0], device=device.type)}],
+    #             "left": {"u": torch.tensor([], device=device.type), "v": torch.tensor([], device=device.type)},
+    #             "right": {"u": torch.tensor([], device=device.type), "v": torch.tensor([], device=device.type)},
+    #             "num_nodes": num_nodes,
+    #         }
+    #     ],
+    #     "rot": torch.eye(2, device=device.type).unsqueeze(0).repeat(batch_size, 1, 1),
+    #     "orig": torch.zeros(batch_size, 2, device=device.type),
+    # }
+    dummy_data = {
+        "feats": [torch.randn(num_actors, seq_len, 3, device=device)],
+        "ctrs": [torch.randn(num_actors, 2, device=device)],
+        "graph": [
+            {
+                "ctrs": torch.randn(num_nodes, 2, device=device),
+                "feats": torch.randn(num_nodes, 2, device=device),
+                "turn": torch.randn(num_nodes, 2, device=device),
+                "control": torch.randint(0, 2, (num_nodes,), device=device),
+                "intersect": torch.randint(0, 2, (num_nodes,), device=device),
+                "pre": [
+                    {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    # {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    # {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    # {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    # {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    # {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                    # {"u": torch.tensor([0], device=device), "v": torch.tensor([1], device=device)},
+                ],
+                "suc": [
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    # {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    # {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    # {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    # {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    # {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                    # {"u": torch.tensor([1], device=device), "v": torch.tensor([0], device=device)},
+                ],
+                "left": {"u": torch.empty(0, dtype=torch.long), "v": torch.empty(0, dtype=torch.long)},
+                "right": {"u": torch.empty(0, dtype=torch.long), "v": torch.empty(0, dtype=torch.long)},
+                # "left": {"u": torch.tensor([], device=device), "v": torch.tensor([], device=device)},
+                # "right": {"u": torch.tensor([], device=device), "v": torch.tensor([], device=device)},
+                "num_nodes": num_nodes,
+            }
+        ],
+        # "rot": [torch.eye(2, device=device).unsqueeze(0).repeat(batch_size, 1, 1)],
+        # "orig": [torch.zeros(batch_size, 2, device=device)],
+        "rot": [torch.eye(2, device=device)],  # 单批次旋转矩阵
+        "orig": [torch.zeros(2, device=device)],  # 单批次原点
+    }
+
+    # 添加维度验证
+    # assert dummy_data["graph"][0]["ctrs"].dim() == 2, "ctrs应为二维坐标"
+    assert dummy_data["graph"][0]["feats"].size(1) == 2, "特征维度应为2"
+    # 添加维度验证
+    assert len(dummy_data["rot"]) == 1, "rot应包含单批次数据"
+    assert len(dummy_data["orig"]) == 1, "orig应包含单批次数据"
+
+    # 设备一致性验证    # 修改后的设备检查函数
+    def check_device(data):
+        if isinstance(data, torch.Tensor):
+            # 仅检查设备类型（cpu/cuda）而非具体索引
+            assert data.device.type == device.type, f"设备类型不匹配！当前:{data.device}, 要求:{device}"
+        elif isinstance(data, dict):
+            for v in data.values():
+                check_device(v)
+        elif isinstance(data, list):
+            for item in data:
+                check_device(item)
+
+    print("正在验证设备一致性...")
+    check_device(dummy_data)
+    # for name, param in net.named_parameters():
+    #     assert param.device == device, f"模型参数 {name} 在 {param.device} 设备上"
+
+    # 运行前向传播验证
+    net = net.to(device)
+
+    with torch.no_grad():
+        net.eval()
+        out = net(dummy_data["feats"], dummy_data["ctrs"], dummy_data["graph"], dummy_data["rot"], dummy_data["orig"])
+        assert all(t.ndim == 4 for t in out["reg"]), "输出维度异常"
+
+        print("ONNX导出前向传播验证成功！")
+
+    # 确保模型所有参数在目标设备上
+    # device = torch.device("cpu")
+
+    # 导出ONNX模型
+    net.eval()
+    torch.onnx.export(
+        net,
+        (dummy_data["feats"], dummy_data["ctrs"], dummy_data["graph"], dummy_data["rot"], dummy_data["orig"]),
+        output_path,
+        input_names=["feats", "ctrs", "graph", "rot", "orig"],
+        output_names=["reg"],  # 只保留必要输出
+        dynamic_axes={
+            "feats": {0: "num_actors"},
+            "ctrs": {0: "num_actors"},
+            "graph": {"num_nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]},
+        },
+        opset_version=14,
+        do_constant_folding=True,
+        custom_opsets={"": 14},  # 显式指定opset
+    )
+    print(f"Successfully exported ONNX model to {output_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fuse Detection in Pytorch")
+    parser.add_argument("-m", "--model", default="lanegcn", type=str, metavar="MODEL", help="model name")
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--resume", default="", type=str, metavar="RESUME", help="checkpoint path")
+    parser.add_argument("--weight", default="", type=str, metavar="WEIGHT", help="checkpoint path")
+    # 添加导出命令
+    parser.add_argument(
+        "--export-onnx",
+        default="/home/czf/project_czf/20241130-mine_prediction_MTP/LaneGCN-note/cache",
+        type=str,
+        help="Path to export ONNX model",
+    )
+
+    # Import all settings for experiment.
+    args = parser.parse_args()
+    model = import_module(args.model)
+    # config, Dataset, collate_fn, net, loss, post_process, opt = model.get_model()
+    net = model.get_model()
+
+    # 添加导出逻辑
+    if args.export_onnx:
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cpu")
+        net.to(device)
+        export_onnx(net, device, args.export_onnx)
+        sys.exit(0)  # 导出后退出

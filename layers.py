@@ -3,7 +3,9 @@
 
 
 import numpy as np
-from fractions import gcd
+# from fractions import gcd
+from math import gcd
+
 from numbers import Number
 
 import torch
@@ -19,7 +21,9 @@ class Conv(nn.Module):
     应用：用于处理二维特征图（如BEV特征）
     """
 
-    def __init__(self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True):
+    def __init__(
+        self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True
+    ):
         super(Conv, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
 
@@ -58,7 +62,9 @@ class Conv1d(nn.Module):
     但在这里，我们使用一维 CNN 来处理轨迹输入，因为**它能有效提取多尺度特征并提高并行计算效率。**
     """
 
-    def __init__(self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True):
+    def __init__(
+        self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True
+    ):
         super(Conv1d, self).__init__()
         # 卷积层定义
         assert norm in ["GN", "BN", "SyncBN"]
@@ -127,7 +133,9 @@ class PostRes(nn.Module):
         super(PostRes, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
 
-        self.conv1 = nn.Conv2d(n_in, n_out, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(
+            n_in, n_out, kernel_size=3, stride=stride, padding=1, bias=False
+        )
         self.conv2 = nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=False)
         self.relu = nn.ReLU(inplace=True)
 
@@ -143,9 +151,15 @@ class PostRes(nn.Module):
 
         if stride != 1 or n_out != n_in:
             if norm == "GN":
-                self.downsample = nn.Sequential(nn.Conv2d(n_in, n_out, kernel_size=1, stride=stride, bias=False), nn.GroupNorm(gcd(ng, n_out), n_out))
+                self.downsample = nn.Sequential(
+                    nn.Conv2d(n_in, n_out, kernel_size=1, stride=stride, bias=False),
+                    nn.GroupNorm(gcd(ng, n_out), n_out),
+                )
             elif norm == "BN":
-                self.downsample = nn.Sequential(nn.Conv2d(n_in, n_out, kernel_size=1, stride=stride, bias=False), nn.BatchNorm2d(n_out))
+                self.downsample = nn.Sequential(
+                    nn.Conv2d(n_in, n_out, kernel_size=1, stride=stride, bias=False),
+                    nn.BatchNorm2d(n_out),
+                )
             else:
                 exit("SyncBN has not been added!")
         else:
@@ -172,7 +186,7 @@ class PostRes(nn.Module):
 class Res1d(nn.Module):
     """1D残差块
     应用：在ActorNet中处理车辆轨迹序列
-    
+
     Res1d 残差连接示意图：
     Input
     │
@@ -183,12 +197,23 @@ class Res1d(nn.Module):
                                         Output
     """
 
-    def __init__(self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True):
+    def __init__(
+        self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True
+    ):
         super(Res1d, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
         padding = (int(kernel_size) - 1) // 2
-        self.conv1 = nn.Conv1d(n_in, n_out, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
-        self.conv2 = nn.Conv1d(n_out, n_out, kernel_size=kernel_size, padding=padding, bias=False)
+        self.conv1 = nn.Conv1d(
+            n_in,
+            n_out,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False,
+        )
+        self.conv2 = nn.Conv1d(
+            n_out, n_out, kernel_size=kernel_size, padding=padding, bias=False
+        )
         self.relu = nn.ReLU(inplace=True)
 
         # All use name bn1 and bn2 to load imagenet pretrained weights
@@ -203,9 +228,15 @@ class Res1d(nn.Module):
 
         if stride != 1 or n_out != n_in:
             if norm == "GN":
-                self.downsample = nn.Sequential(nn.Conv1d(n_in, n_out, kernel_size=1, stride=stride, bias=False), nn.GroupNorm(gcd(ng, n_out), n_out))
+                self.downsample = nn.Sequential(
+                    nn.Conv1d(n_in, n_out, kernel_size=1, stride=stride, bias=False),
+                    nn.GroupNorm(gcd(ng, n_out), n_out),
+                )
             elif norm == "BN":
-                self.downsample = nn.Sequential(nn.Conv1d(n_in, n_out, kernel_size=1, stride=stride, bias=False), nn.BatchNorm1d(n_out))
+                self.downsample = nn.Sequential(
+                    nn.Conv1d(n_in, n_out, kernel_size=1, stride=stride, bias=False),
+                    nn.BatchNorm1d(n_out),
+                )
             else:
                 exit("SyncBN has not been added!")
         else:
@@ -235,7 +266,7 @@ class LinearRes(nn.Module):
         x → linear1 → norm1 → relu → linear2 → norm2 → + → relu
         |_____________________________________________|
     """
-    
+
     def __init__(self, n_in, n_out, norm="GN", ng=32):
         super(LinearRes, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
@@ -255,9 +286,14 @@ class LinearRes(nn.Module):
 
         if n_in != n_out:
             if norm == "GN":
-                self.transform = nn.Sequential(nn.Linear(n_in, n_out, bias=False), nn.GroupNorm(gcd(ng, n_out), n_out))
+                self.transform = nn.Sequential(
+                    nn.Linear(n_in, n_out, bias=False),
+                    nn.GroupNorm(gcd(ng, n_out), n_out),
+                )
             elif norm == "BN":
-                self.transform = nn.Sequential(nn.Linear(n_in, n_out, bias=False), nn.BatchNorm1d(n_out))
+                self.transform = nn.Sequential(
+                    nn.Linear(n_in, n_out, bias=False), nn.BatchNorm1d(n_out)
+                )
             else:
                 exit("SyncBN has not been added!")
         else:
@@ -281,6 +317,7 @@ class LinearRes(nn.Module):
 
 class Null(nn.Module):
     """空操作层（占位符）"""
+
     def __init__(self):
         super(Null, self).__init__()
 
@@ -296,7 +333,7 @@ def linear_interp(x, n_max):
         1. 将x从[0,1]映射到[-0.5, n_max-0.5]
         2. 计算左右相邻整数坐标
         3. 根据距离计算权重
-        
+
     Given a Tensor of normed positions, returns linear interplotion weights and indices.
     Example: For position 1.2, its neighboring pixels have indices 0 and 1, corresponding
     to coordinates 0.5 and 1.5 (center of the pixel), and linear weights are 0.3 and 0.7.
@@ -351,7 +388,7 @@ def get_roi_feat(fm, bboxes, roi_size, pts_range):
         3. 使用linear_interp进行双线性插值
         4. 聚合有效区域的特征
     应用：用于从BEV特征图中提取旋转区域特征
-    
+
     Rotated ROI Align 流程：
         1. 定义旋转框参数 (cx, cy, w, h, θ)
         2. 生成采样网格（考虑旋转角度）
@@ -362,8 +399,8 @@ def get_roi_feat(fm, bboxes, roi_size, pts_range):
         │    └───────┘ │
         └──────────────┘
         3. 双线性插值获取特征值
-    
-    
+
+
     Given a set of BEV bboxes get their BEV ROI features.
 
     Args:
@@ -376,23 +413,33 @@ def get_roi_feat(fm, bboxes, roi_size, pts_range):
     if isinstance(roi_size, Number):
         roi_size = [roi_size, roi_size]
 
-    cx, cy, wid, hgt, theta = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3], bboxes[:, 4]
+    cx, cy, wid, hgt, theta = (
+        bboxes[:, 0],
+        bboxes[:, 1],
+        bboxes[:, 2],
+        bboxes[:, 3],
+        bboxes[:, 4],
+    )
     st = torch.sin(theta)
     ct = torch.cos(theta)
     num_bboxes = len(bboxes)
 
     # 生成旋转采样网格
     rot_mat = bboxes.new().resize_(num_bboxes, 2, 2)
-    rot_mat[:, 0, 0] = ct   # 根据角度计算旋转矩阵
-    rot_mat[:, 0, 1] = -st 
+    rot_mat[:, 0, 0] = ct  # 根据角度计算旋转矩阵
+    rot_mat[:, 0, 1] = -st
     rot_mat[:, 1, 0] = st
     rot_mat[:, 1, 1] = ct
 
     # 生成相对采样点
-    offset = bboxes.new().resize_(len(bboxes), roi_size[0], roi_size[1], 2) 
-    x_bin = (torch.arange(roi_size[1]).float().to(bboxes.device) + 0.5) / roi_size[1] - 0.5
+    offset = bboxes.new().resize_(len(bboxes), roi_size[0], roi_size[1], 2)
+    x_bin = (torch.arange(roi_size[1]).float().to(bboxes.device) + 0.5) / roi_size[
+        1
+    ] - 0.5
     offset[:, :, :, 0] = x_bin.view(1, 1, -1) * wid.view(-1, 1, 1)
-    y_bin = (torch.arange(roi_size[0] - 1, -1, -1).float().to(bboxes.device) + 0.5) / roi_size[0] - 0.5
+    y_bin = (
+        torch.arange(roi_size[0] - 1, -1, -1).float().to(bboxes.device) + 0.5
+    ) / roi_size[0] - 0.5
     offset[:, :, :, 1] = y_bin.view(1, -1, 1) * hgt.view(-1, 1, 1)
 
     rot_mat = rot_mat.view(num_bboxes, 1, 1, 2, 2)
@@ -425,5 +472,7 @@ def get_roi_feat(fm, bboxes, roi_size, pts_range):
     )
     feat[torch.logical_not(mask)] = 0
     feat = feat.view(num_bboxes, roi_size[0] * roi_size[1], fm_c)
-    feat = feat.transpose(1, 2).contiguous().view(num_bboxes, -1, roi_size[0], roi_size[1])
+    feat = (
+        feat.transpose(1, 2).contiguous().view(num_bboxes, -1, roi_size[0], roi_size[1])
+    )
     return feat
