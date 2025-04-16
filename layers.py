@@ -3,6 +3,7 @@
 
 
 import numpy as np
+
 # from fractions import gcd
 from math import gcd
 
@@ -21,9 +22,7 @@ class Conv(nn.Module):
     应用：用于处理二维特征图（如BEV特征）
     """
 
-    def __init__(
-        self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True
-    ):
+    def __init__(self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True):
         super(Conv, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
 
@@ -63,9 +62,7 @@ class Conv1d(nn.Module):
     但在这里，我们使用一维 CNN 来处理轨迹输入，因为**它能有效提取多尺度特征并提高并行计算效率。**
     """
 
-    def __init__(
-        self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True
-    ):
+    def __init__(self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True):
         super(Conv1d, self).__init__()
         # 卷积层定义
         assert norm in ["GN", "BN", "SyncBN"]
@@ -82,7 +79,7 @@ class Conv1d(nn.Module):
         if norm == "GN":
             # self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
             self.norm = nn.GroupNorm(16, n_out)  # 确保128%16==0
-            
+
         elif norm == "BN":
             self.norm = nn.BatchNorm1d(n_out)
         else:
@@ -99,6 +96,55 @@ class Conv1d(nn.Module):
         return out
 
 
+class LinearRes(nn.Module):
+    def __init__(self, n_in, n_out, norm="GN", ng=32):
+        super(LinearRes, self).__init__()
+        # 参数说明：
+        # n_in: 输入特征维度 如128
+        # n_out: 输出特征维度 如128
+        # norm: 归一化类型，固定为GN
+        # ng: 分组数，实际未使用
+
+        # 第一线性层
+        self.linear1 = nn.Linear(n_in, n_out, bias=False)  # [N, C_in] → [N, C_out]
+        # 归一化层（分组数固定为16）
+        self.norm1 = nn.GroupNorm(16, n_out)  # 保持形状 [N, C_out]
+
+        # 第二线性层
+        self.linear2 = nn.Linear(n_out, n_out, bias=False)  # [N, C_out] → [N, C_out]
+        self.norm2 = nn.GroupNorm(16, n_out)  # [N, C_out]
+
+        # 维度变换模块
+        if n_in != n_out:
+            self.transform = nn.Sequential(nn.Linear(n_in, n_out, bias=False), nn.GroupNorm(16, n_out))  # [N, C_in] → [N, C_out]  # [N, C_out]
+        else:
+            self.transform = None
+
+    def forward(self, x):
+        """输入输出维度流：
+        Input shape: (batch_size, num_elements, n_in) 或 (batch_size, n_in)
+        典型输入场景：
+        - ActorNet输出: [num_actors, 128]
+        - MapNet输出: [num_nodes, 128]
+        """
+        # 前向传播路径
+        out = self.linear1(x)  # [..., C_in] → [..., C_out]
+        out = self.norm1(out)  # 保持形状
+        out = F.relu(out)  # 非线性激活
+
+        out = self.linear2(out)  # [..., C_out] → [..., C_out]
+        out = self.norm2(out)  # 保持形状
+
+        # 残差连接
+        if self.transform is not None:
+            res = self.transform(x)  # [..., C_in] → [..., C_out]
+        else:
+            res = x  # [..., C_out]（当C_in=C_out时）
+
+        out += res  # 特征相加 [..., C_out]
+        return F.relu(out)  # 最终输出 [..., C_out]
+
+
 class Linear(nn.Module):
     def __init__(self, n_in, n_out, norm="GN", ng=32, act=True):
         super(Linear, self).__init__()
@@ -109,7 +155,7 @@ class Linear(nn.Module):
         if norm == "GN":
             # self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
             self.norm = nn.GroupNorm(16, n_out)  # 确保128%16==0
-            
+
         elif norm == "BN":
             self.norm = nn.BatchNorm1d(n_out)
         else:
@@ -138,9 +184,7 @@ class PostRes(nn.Module):
         super(PostRes, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
 
-        self.conv1 = nn.Conv2d(
-            n_in, n_out, kernel_size=3, stride=stride, padding=1, bias=False
-        )
+        self.conv1 = nn.Conv2d(n_in, n_out, kernel_size=3, stride=stride, padding=1, bias=False)
         self.conv2 = nn.Conv2d(n_out, n_out, kernel_size=3, padding=1, bias=False)
         self.relu = nn.ReLU(inplace=True)
 
@@ -200,7 +244,7 @@ class Res1d(nn.Module):
     └────────────────────────────────────┘
                                         │
                                         Output
-                                        
+
     输入形状: [batch, channels, seq_len]
     输出形状: 保持输入形状
     结构：
@@ -208,9 +252,7 @@ class Res1d(nn.Module):
     功能：提取时序特征，残差连接避免梯度消失
     """
 
-    def __init__(
-        self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True
-    ):
+    def __init__(self, n_in, n_out, kernel_size=3, stride=1, norm="GN", ng=32, act=True):
         super(Res1d, self).__init__()
         assert norm in ["GN", "BN", "SyncBN"]
         padding = (int(kernel_size) - 1) // 2
@@ -222,9 +264,7 @@ class Res1d(nn.Module):
             padding=padding,
             bias=False,
         )
-        self.conv2 = nn.Conv1d(
-            n_out, n_out, kernel_size=kernel_size, padding=padding, bias=False
-        )
+        self.conv2 = nn.Conv1d(n_out, n_out, kernel_size=kernel_size, padding=padding, bias=False)
         self.relu = nn.ReLU(inplace=True)
 
         # All use name bn1 and bn2 to load imagenet pretrained weights
@@ -276,7 +316,7 @@ class LinearRes(nn.Module):
     原理：将残差思想应用于全连接层
         x → linear1 → norm1 → relu → linear2 → norm2 → + → relu
         |_____________________________________________|
-        
+
     输入形状: [..., features]
     输出形状: 保持特征维度
     结构：
@@ -308,9 +348,7 @@ class LinearRes(nn.Module):
                     nn.GroupNorm(gcd(ng, n_out), n_out),
                 )
             elif norm == "BN":
-                self.transform = nn.Sequential(
-                    nn.Linear(n_in, n_out, bias=False), nn.BatchNorm1d(n_out)
-                )
+                self.transform = nn.Sequential(nn.Linear(n_in, n_out, bias=False), nn.BatchNorm1d(n_out))
             else:
                 exit("SyncBN has not been added!")
         else:
@@ -450,13 +488,9 @@ def get_roi_feat(fm, bboxes, roi_size, pts_range):
 
     # 生成相对采样点
     offset = bboxes.new().resize_(len(bboxes), roi_size[0], roi_size[1], 2)
-    x_bin = (torch.arange(roi_size[1]).float().to(bboxes.device) + 0.5) / roi_size[
-        1
-    ] - 0.5
+    x_bin = (torch.arange(roi_size[1]).float().to(bboxes.device) + 0.5) / roi_size[1] - 0.5
     offset[:, :, :, 0] = x_bin.view(1, 1, -1) * wid.view(-1, 1, 1)
-    y_bin = (
-        torch.arange(roi_size[0] - 1, -1, -1).float().to(bboxes.device) + 0.5
-    ) / roi_size[0] - 0.5
+    y_bin = (torch.arange(roi_size[0] - 1, -1, -1).float().to(bboxes.device) + 0.5) / roi_size[0] - 0.5
     offset[:, :, :, 1] = y_bin.view(1, -1, 1) * hgt.view(-1, 1, 1)
 
     rot_mat = rot_mat.view(num_bboxes, 1, 1, 2, 2)
@@ -489,7 +523,5 @@ def get_roi_feat(fm, bboxes, roi_size, pts_range):
     )
     feat[torch.logical_not(mask)] = 0
     feat = feat.view(num_bboxes, roi_size[0] * roi_size[1], fm_c)
-    feat = (
-        feat.transpose(1, 2).contiguous().view(num_bboxes, -1, roi_size[0], roi_size[1])
-    )
+    feat = feat.transpose(1, 2).contiguous().view(num_bboxes, -1, roi_size[0], roi_size[1])
     return feat
