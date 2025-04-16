@@ -453,3 +453,385 @@ dist = torch.cat(
 5. 各 tensor 的物理意义
 
 建议在 IDE 中结合代码结构逐模块添加，保持注释与代码的对应关系。对于已有中文注释的部分，可以优化表述或补充实现细节。
+
+# 33
+
+以下是对 LaneGCN 各模块的逐层注释及功能解释：
+
+### 一、ActorNet（车辆轨迹特征提取）
+
+```python
+class ActorNet(nn.Module):
+    def __init__(self, config):
+        # 输入: [batch_size, seq_len, 3] (x,y坐标+时间戳)
+        # 输出: [batch_size, n_actor=128]
+        groups = [
+            Res1d(3, 32, norm="GN", ng=1),  # 输入3通道，输出32通道
+            Res1d(32, 64, stride=2, norm="GN", ng=1),  # 下采样，特征维度64
+            Res1d(64, 128, stride=2, norm="GN", ng=1)  # 再次下采样，特征维度128
+        ]
+        self.groups = nn.ModuleList(groups)  # 多尺度特征提取
+
+        lateral = [
+            Conv1d(32, 128),  # 32->128通道转换
+            Conv1d(64, 128),
+            Conv1d(128, 128)
+        ]
+        self.lateral = nn.ModuleList(lateral)  # 特征融合
+
+    def forward(self, actors):
+        # actors输入形状: [total_actors, 3, 20]
+        # 输出形状: [total_actors, 128]
+```
+
+功能说明：
+
+1. **Res1d 残差块**：通过 3 层 1D 卷积逐步提取多尺度轨迹特征
+   - 第一层：32 通道，保持时序长度
+   - 第二层：64 通道，时序长度减半（stride=2）
+   - 第三层：128 通道，时序长度再减半
+2. **特征融合层**：将不同尺度的特征图上采样后相加，实现多尺度特征融合
+3. **输出层**：取最后一个时间步的特征作为车辆编码
+
+---
+
+### 二、MapNet（地图拓扑特征提取）
+
+```python
+class MapNet(nn.Module):
+    def __init__(self, config):
+        # 输入:
+        #   ctrs: [num_nodes, 2] (车道中心点坐标)
+        #   feats: [num_nodes, 2] (车道方向向量)
+        # 输出: [num_nodes, n_map=128]
+        self.input = nn.Sequential(
+            Linear(2, 128),  # 坐标编码
+            Linear(128, 128)
+        )
+        self.seg = nn.Sequential(
+            Linear(2, 128),  # 方向向量编码
+            Linear(128, 128)
+        )
+
+        # 图卷积层配置
+        self.fuse = nn.ModuleDict({
+            "pre0": [GroupNorm(16, 128)],  # 分组数16 (128%16=0)
+            "suc0": [GroupNorm(16, 128)],
+            # ...其他连接类型
+        })
+```
+
+功能说明：
+
+1. **坐标编码层**：将车道中心点坐标映射到 128 维特征
+2. **方向编码层**：将车道方向向量编码为 128 维
+3. **图卷积层**：通过`GroupNorm+Linear`实现多跳邻域信息聚合
+   - 支持 6 个尺度（num_scales）的邻域连接
+   - 使用分组归一化（16 组）稳定训练
+
+---
+
+### 三、Actor-Map 融合模块
+
+#### 1. A2M（Actor 到 Map 信息传递）
+
+```python
+class A2M(nn.Module):
+    def __init__(self, config):
+        # 输入:
+        #   actors: [N_actor, 128]
+        #   nodes: [N_node, 128]
+        # 输出: [N_node, 128]
+        self.att = Att(n_map=128, n_actor=128)  # 注意力机制
+
+    def forward(self, nodes, graph, actors):
+        # 通过注意力机制将车辆特征融合到车道节点
+```
+
+#### 2. M2M（Map 内部信息传播）
+
+```python
+class M2M(nn.Module):
+    # 结构与MapNet类似，使用图卷积层
+    # 输入输出均为[N_node, 128]
+    # 通过多层GN+Linear实现车道间信息传递
+```
+
+#### 3. M2A（Map 到 Actor 信息传递）
+
+```python
+class M2A(nn.Module):
+    # 逆向注意力机制，将车道特征融合到车辆节点
+    # 输入输出维度与A2M相反
+```
+
+#### 4. A2A（Actor 交互建模）
+
+```python
+class A2A(nn.Module):
+    # 车辆间注意力机制
+    # 输入输出均为[N_actor, 128]
+```
+
+---
+
+### 四、PredNet（轨迹预测头）
+
+```python
+class PredNet(nn.Module):
+    def __init__(self, config):
+        # 输入: [N_actor, 128]
+        # 输出:
+        #   reg: [batch_size, num_modes=6, pred_steps=30, 2]
+        self.pred = nn.ModuleList([
+            LinearRes(128, 128) + Linear(128, 60)  # 每个模态预测30个(x,y)点
+            for _ in range(6)  # 6个预测模态
+        ])
+```
+
+---
+
+### 五、关键层结构说明（layers.py）
+
+#### 1. Res1d 残差块
+
+```python
+class Res1d(nn.Module):
+    """
+    输入形状: [batch, channels, seq_len]
+    输出形状: 保持输入形状
+    结构：
+        Conv1d → GN → ReLU → Conv1d → GN → Add → ReLU
+    功能：提取时序特征，残差连接避免梯度消失
+    """
+```
+
+#### 2. LinearRes 线性残差
+
+```python
+class LinearRes(nn.Module):
+    """
+    输入形状: [..., features]
+    输出形状: 保持特征维度
+    结构：
+        Linear → GN → ReLU → Linear → GN → Add → ReLU
+    功能：全连接层的残差变体，增强特征表达能力
+    """
+```
+
+#### 3. GroupNorm 配置
+
+```python
+# 修改后的GroupNorm层（解决ONNX兼容性）
+groups = 16 if n_out % 16 == 0 else 1
+nn.GroupNorm(groups, n_out)
+```
+
+**设计考量**：当特征维度为 128 时，使用 16 组；其他情况自动调整分组数，避免出现`num_groups=1`导致 ONNX 兼容问题
+
+---
+
+### 六、完整数据流维度变化
+
+1. **输入数据**：
+
+   - Actor 轨迹：`[batch_size, num_actors, 20, 3]` （20 帧历史轨迹）
+   - 地图数据：`[batch_size, num_nodes, 2]` （车道中心点）
+
+2. **处理过程**：
+
+   ```
+   ActorNet: [N_actor, 3, 20] → [N_actor, 128]
+   MapNet: [N_node, 2] → [N_node, 128]
+   A2M/M2M/M2A/A2A: 保持128维特征
+   PredNet: [N_actor, 128] → [N_actor, 6, 30, 2]
+   ```
+
+3. **输出**：
+   - 多模态轨迹预测：`6`种可能轨迹，每种预测`30`个时间步的`(x,y)`坐标
+
+通过这种层级化设计，LaneGCN 实现了高效的车辆-地图交互建模，最终输出符合人类驾驶逻辑的多模态轨迹预测。
+
+# 44
+
+以下是为 LaneGCN 各模块 forward 函数添加的逐层输入输出注释（以关键模块为例）：
+
+### 1. ActorNet（车辆轨迹特征提取）
+
+```python
+class ActorNet(nn.Module):
+    def forward(self, actors: Tensor) -> Tensor:
+        """
+        输入:
+            actors: 车辆轨迹特征
+            - 形状: [num_actors, 3, 20]
+            - 含义: [总车辆数, 特征维度(x,y,t), 历史帧数]
+
+        处理流程:
+            1. 转置输入: [num_actors, 3, 20] → [num_actors, 20, 3]
+            2. 通过3层Res1d残差卷积:
+                - 第1层: [num_actors, 32, 20] (保持长度)
+                - 第2层: [num_actors, 64, 10] (stride=2下采样)
+                - 第3层: [num_actors, 128, 5] (再次下采样)
+            3. 特征融合:
+                - 上采样64层特征 → [128, 10] 与第2层融合
+                - 再次上采样 → [128, 20] 与第1层融合
+
+        输出:
+            Tensor - 提取的车辆特征
+            - 形状: [num_actors, 128]
+            - 维度说明: [总车辆数, 特征维度]
+        """
+        out = actors.transpose(1, 2)  # [N,3,20] → [N,20,3]
+        outputs = []
+        for i in range(len(self.groups)):
+            out = self.groups[i](out)  # 各层输出形状变化
+            outputs.append(out)
+        # 特征融合过程...
+        return out[:, :, -1]  # 取最后时间步
+```
+
+### 2. MapNet（地图特征提取）
+
+```python
+class MapNet(nn.Module):
+    def forward(self, graph):
+        """
+        输入:
+            graph: 地图图结构数据
+            - ctrs: [num_nodes, 2] (车道中心点坐标)
+            - feats: [num_nodes, 2] (方向向量)
+            - 邻接关系: pre/suc/left/right等连接信息
+
+        处理流程:
+            1. 坐标编码: [num_nodes, 2] → [num_nodes, 128]
+            2. 方向编码: [num_nodes, 2] → [num_nodes, 128]
+            3. 特征融合: 坐标+方向特征相加 → [num_nodes, 128]
+            4. 多尺度图卷积:
+                - 通过6个尺度(pre0~pre5, suc0~suc5)聚合邻域信息
+                - 每个尺度使用GroupNorm+Linear处理
+
+        输出:
+            Tuple[Tensor, List[Tensor], List[Tensor]]:
+                - nodes: 车道节点特征 [num_nodes, 128]
+                - node_idcs: 各批次节点索引列表
+                - node_ctrs: 各批次节点中心坐标列表
+        """
+        # 具体实现...
+```
+
+### 3. A2M（Actor 到 Map 融合）
+
+```python
+class A2M(nn.Module):
+    def forward(self, nodes, graph, actors, actor_idcs, actor_ctrs):
+        """
+        输入:
+            nodes: 车道节点特征 [num_nodes, 128]
+            actors: 车辆特征 [num_actors, 128]
+            actor_ctrs: 车辆中心坐标 [num_actors, 2]
+
+        处理流程:
+            1. 计算车辆与车道的空间关系（距离过滤）
+            2. 注意力机制计算：
+                - 线性变换生成query/key
+                - 空间位置编码（相对坐标）
+                - 特征拼接与融合
+            3. 使用index_add聚合特征到车道节点
+
+        输出:
+            Tensor - 更新后的车道节点特征
+            - 形状: [num_nodes, 128]
+            - 特征包含实时交通信息
+        """
+        # 具体实现...
+```
+
+### 4. M2A（Map 到 Actor 融合）
+
+```python
+class M2A(nn.Module):
+    def forward(self, actors, actor_idcs, actor_ctrs, nodes, node_idcs, node_ctrs):
+        """
+        输入:
+            actors: 车辆特征 [num_actors, 128]
+            nodes: 车道特征 [num_nodes, 128]
+
+        处理流程:
+            1. 逆向注意力机制（车道→车辆）
+            2. 计算车道对车辆的影响权重
+            3. 特征加权聚合
+
+        输出:
+            Tensor - 更新后的车辆特征
+            - 形状: [num_actors, 128]
+            - 特征包含地图拓扑信息
+        """
+        # 具体实现...
+```
+
+### 5. PredNet（轨迹预测头）
+
+```python
+class PredNet(nn.Module):
+    def forward(self, actors, actor_idcs, actor_ctrs):
+        """
+        输入:
+            actors: 最终车辆特征 [num_actors, 128]
+
+        处理流程:
+            1. 通过6个并行预测头生成多模态轨迹
+                - 每个模态: LinearRes → Linear
+            2. 轨迹坐标转换（局部→全局）
+
+        输出:
+            Dict[str, List[Tensor]]:
+                - reg: 预测轨迹列表
+                    - 每个元素形状: [batch_actors, 6, 30, 2]
+                    - 含义: [当前批次车辆数, 模态数, 预测步长, 坐标]
+                - cls: 各模态置信度（可选）
+        """
+        # 具体实现...
+```
+
+### 6. 注意力模块（Att）
+
+```python
+class Att(nn.Module):
+    def forward(self, agts, agt_idcs, agt_ctrs, ctx, ctx_idcs, ctx_ctrs, dist_th):
+        """
+        输入:
+            agts: 目标节点特征 [num_agts, D]
+            ctx: 上下文节点特征 [num_ctx, D]
+            *_ctrs: 各节点坐标
+
+        处理流程:
+            1. 空间关系编码（相对坐标→高维）
+            2. Query-Key乘积计算注意力权重
+            3. 加权聚合上下文特征
+
+        输出:
+            Tensor - 更新后的目标节点特征
+            - 形状: [num_agts, D]
+            - 特征包含上下文信息
+        """
+        # 具体实现...
+```
+
+### 关键数据维度变化表
+
+| 模块     | 输入形状        | 输出形状      | 说明               |
+| -------- | --------------- | ------------- | ------------------ |
+| ActorNet | [N, 3, 20]      | [N, 128]      | 轨迹时序特征提取   |
+| MapNet   | [M, 2]          | [M, 128]      | 车道拓扑特征提取   |
+| A2M      | [M,128]+[N,128] | [M, 128]      | 车辆信息融合到车道 |
+| M2A      | [N,128]+[M,128] | [N, 128]      | 车道信息融合到车辆 |
+| PredNet  | [N, 128]        | [B, 6, 30, 2] | 生成多模态轨迹预测 |
+
+注：
+
+- N：总车辆数（跨批次）
+- M：总车道节点数
+- B：批次车辆数
+- 6：预测模态数
+- 30：预测时间步数

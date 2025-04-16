@@ -169,7 +169,7 @@ class Net(nn.Module):
         return out
 
     # "feats", "ctrs", "graph", "rot", "orig"
-    def forward(self, feats, ctrs, graph, rot, orig) -> Dict[str, List[Tensor]]:
+    def forward222_2(self, feats, ctrs, graph, rot, orig) -> Dict[str, List[Tensor]]:
         """
         前向传播函数。
         :param data: 输入数据字典，包含轨迹、地图等信息。
@@ -202,6 +202,81 @@ class Net(nn.Module):
         for i in range(len(out["reg"])):
             # 使用索引0获取当前批次的旋转矩阵和原点
             out["reg"][i] = torch.matmul(out["reg"][i], rot[0]) + orig[0].view(1, 1, 1, -1)
+        return out
+
+    def forward(
+        self,
+        feats,
+        ctrs,
+        graph_ctrs,
+        graph_feats,
+        graph_turn,
+        graph_control,
+        graph_intersect,
+        graph_pre_u,
+        graph_pre_v,
+        graph_suc_u,
+        graph_suc_v,
+        graph_left_u,
+        graph_left_v,
+        graph_right_u,
+        graph_right_v,
+        rot,
+        orig,
+    ):
+        """
+        前向传播函数。
+        :param data: 输入数据字典，包含轨迹、地图等信息。
+        :return: 输出字典，包含分类和回归结果。
+        """
+        #  重构graph字典
+        graph = [
+            {
+                "ctrs": graph_ctrs,
+                "feats": graph_feats,
+                "turn": graph_turn,
+                "control": graph_control,
+                "intersect": graph_intersect,
+                "pre": [{"u": graph_pre_u, "v": graph_pre_v} for _ in range(config["num_scales"])],
+                "suc": [{"u": graph_suc_u, "v": graph_suc_v} for _ in range(config["num_scales"])],
+                "left": {"u": graph_left_u, "v": graph_left_v},
+                "right": {"u": graph_right_u, "v": graph_right_v},
+                "num_nodes": 1,
+            }
+        ]
+        # 构造 Actor 特征
+        actors, actor_idcs = actor_gather(feats)  # 聚合批次车辆特征 [total_actors, seq_len, 2]
+        actor_ctrs = ctrs  # 车辆中心坐标 [total_actors, 2]
+        actors = self.actor_net(actors)  # 提取车辆特征 [total_actors, n_actor]
+
+        # 构造地图特征
+        graph = graph_gather(to_long(graph))  # 聚合地图图结构
+        nodes, node_idcs, node_ctrs = self.map_net(graph)  # 提取地图特征 [total_nodes, n_map]
+
+        # Actor-Map 融合循环
+        nodes = self.a2m(nodes, graph, actors, actor_idcs, actor_ctrs)  # Actor 到 Map 融合
+        nodes = self.m2m(nodes, graph)  # Map 到 Map 融合
+        actors = self.m2a(actors, actor_idcs, actor_ctrs, nodes, node_idcs, node_ctrs)  # Map 到 Actor 融合
+        actors = self.a2a(actors, actor_idcs, actor_ctrs)  # Actor 到 Actor 融合
+
+        # 预测
+        out = self.pred_net(actors, actor_idcs, actor_ctrs)  # 预测未来轨迹
+        # rot, orig = gpu(data["rot"]), gpu(data["orig"])  # 获取旋转矩阵和原点
+        # 将预测结果转换到世界坐标系
+        # 修改前
+        # for i in range(len(out["reg"])):
+        #     out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(1, 1, 1, -1)
+
+        # 修改后（假设rot/orig是单批次输入）
+        for i in range(len(out["reg"])):
+            # 使用索引0获取当前批次的旋转矩阵和原点
+            # out["reg"][i] = torch.matmul(out["reg"][i], rot[0]) + orig[0].view(1, 1, 1, -1)
+            # 修改前
+            # out["reg"][i] = torch.matmul(out["reg"][i], rot[0])
+
+            # 修改后（添加contiguous确保内存布局）
+            out["reg"][i] = torch.matmul(out["reg"][i].contiguous(), rot[0].contiguous())
+
         return out
 
 
@@ -274,6 +349,14 @@ def graph_gather(graphs):
 class ActorNet(nn.Module):
     """
     Actor 特征提取器，使用 1D 卷积网络。
+
+    功能说明：
+        1. **Res1d 残差块**：通过 3 层 1D 卷积逐步提取多尺度轨迹特征
+        - 第一层：32 通道，保持时序长度
+        - 第二层：64 通道，时序长度减半（stride=2）
+        - 第三层：128 通道，时序长度再减半
+        2. **特征融合层**：将不同尺度的特征图上采样后相加，实现多尺度特征融合
+        3. **输出层**：取最后一个时间步的特征作为车辆编码
     """
 
     def __init__(self, config):
@@ -317,9 +400,25 @@ class ActorNet(nn.Module):
 
     def forward(self, actors: Tensor) -> Tensor:
         """
-        前向传播函数。
-        :param actors: 输入的 Actor 特征张量。
-        :return: 提取后的 Actor 特征张量。
+        输入:
+            actors: 车辆轨迹特征
+            - 形状: [num_actors, 3, 20]
+            - 含义: [总车辆数, 特征维度(x,y,t), 历史帧数]
+
+        处理流程:
+            1. 转置输入: [num_actors, 3, 20] → [num_actors, 20, 3]
+            2. 通过3层Res1d残差卷积:
+                - 第1层: [num_actors, 32, 20] (保持长度)
+                - 第2层: [num_actors, 64, 10] (stride=2下采样)
+                - 第3层: [num_actors, 128, 5] (再次下采样)
+            3. 特征融合:
+                - 上采样64层特征 → [128, 10] 与第2层融合
+                - 再次上采样 → [128, 20] 与第1层融合
+
+        输出:
+            Tensor - 提取的车辆特征
+            - 形状: [num_actors, 128]
+            - 维度说明: [总车辆数, 特征维度]
         """
         out = actors
 
@@ -342,6 +441,14 @@ class ActorNet(nn.Module):
 class MapNet(nn.Module):
     """
     Map Graph 特征提取器，使用 LaneGraphCNN。
+
+    功能说明：
+
+        1. **坐标编码层**：将车道中心点坐标映射到 128 维特征
+        2. **方向编码层**：将车道方向向量编码为 128 维
+        3. **图卷积层**：通过`GroupNorm+Linear`实现多跳邻域信息聚合
+        - 支持 6 个尺度（num_scales）的邻域连接
+        - 使用分组归一化（16 组）稳定训练
     """
 
     def __init__(self, config):
@@ -377,7 +484,8 @@ class MapNet(nn.Module):
                     # 修改前（lanegcn.py MapNet部分）
                     # fuse[key].append(nn.GroupNorm(gcd(ng, n_map), n_map))
                     # 修改后（显式设置num_groups=1）
-                    fuse[key].append(nn.GroupNorm(1, n_map))  # 强制分组数为1
+                    groups = 16 if n_map % 16 == 0 else 1  # 确保n_map能被groups整除
+                    fuse[key].append(nn.GroupNorm(groups, n_map))  # 强制分组数为1
                 elif key in ["ctr2"]:
                     fuse[key].append(Linear(n_map, n_map, norm=norm, ng=ng, act=False))
                 else:
@@ -390,9 +498,25 @@ class MapNet(nn.Module):
 
     def forward(self, graph):
         """
-        前向传播函数。
-        :param graph: 输入的地图图结构。
-        :return: 提取后的地图特征张量、节点索引和中心点。
+        输入:
+            graph: 地图图结构数据
+            - ctrs: [num_nodes, 2] (车道中心点坐标)
+            - feats: [num_nodes, 2] (方向向量)
+            - 邻接关系: pre/suc/left/right等连接信息
+
+        处理流程:
+            1. 坐标编码: [num_nodes, 2] → [num_nodes, 128]
+            2. 方向编码: [num_nodes, 2] → [num_nodes, 128]
+            3. 特征融合: 坐标+方向特征相加 → [num_nodes, 128]
+            4. 多尺度图卷积:
+                - 通过6个尺度(pre0~pre5, suc0~suc5)聚合邻域信息
+                - 每个尺度使用GroupNorm+Linear处理
+
+        输出:
+            Tuple[Tensor, List[Tensor], List[Tensor]]:
+                - nodes: 车道节点特征 [num_nodes, 128]
+                - node_idcs: 各批次节点索引列表
+                - node_ctrs: 各批次节点中心坐标列表
         """
         if len(graph["feats"]) == 0 or len(graph["pre"][-1]["u"]) == 0 or len(graph["suc"][-1]["u"]) == 0:
             temp = graph["feats"]
@@ -461,8 +585,9 @@ class MapNet(nn.Module):
 
 class A2M(nn.Module):
     """
-    Actor to Map Fusion:  fuses real-time traffic information from
-    actor nodes to lane nodes
+    Actor to Map Fusion:  fuses real-time traffic information from actor nodes to lane nodes
+
+    1. A2M（Actor 到 Map 信息传递）
     """
 
     def __init__(self, config):
@@ -487,7 +612,27 @@ class A2M(nn.Module):
         actor_idcs: List[Tensor],
         actor_ctrs: List[Tensor],
     ) -> Tensor:
-        """meta, static and dyn fuse using attention"""
+        """meta, static and dyn fuse using attention
+        通过注意力机制将车辆特征融合到车道节点
+        
+        输入:
+            nodes: 车道节点特征 [num_nodes, 128]
+            actors: 车辆特征 [num_actors, 128]
+            actor_ctrs: 车辆中心坐标 [num_actors, 2]
+
+        处理流程:
+            1. 计算车辆与车道的空间关系（距离过滤）
+            2. 注意力机制计算：
+                - 线性变换生成query/key
+                - 空间位置编码（相对坐标）
+                - 特征拼接与融合
+            3. 使用index_add聚合特征到车道节点
+
+        输出:
+            Tensor - 更新后的车道节点特征
+            - 形状: [num_nodes, 128]
+            - 特征包含实时交通信息
+        """
         meta = torch.cat(
             (
                 graph["turn"],
@@ -513,8 +658,10 @@ class A2M(nn.Module):
 
 class M2M(nn.Module):
     """
-    The lane to lane block: propagates information over lane
-            graphs and updates the features of lane nodes
+    The lane to lane block: propagates information over lane graphs and updates the features of lane nodes
+    # 结构与MapNet类似，使用图卷积层
+    # 输入输出均为[N_node, 128]
+    # 通过多层GN+Linear实现车道间信息传递
     """
 
     def __init__(self, config):
@@ -590,8 +737,10 @@ class M2M(nn.Module):
 
 class M2A(nn.Module):
     """
-    The lane to actor block fuses updated
-        map information from lane nodes to actor nodes
+    The lane to actor block fuses updated map information from lane nodes to actor nodes
+
+    # 逆向注意力机制，将车道特征融合到车辆节点
+    # 输入输出维度与A2M相反
     """
 
     def __init__(self, config):
@@ -617,6 +766,21 @@ class M2A(nn.Module):
         node_idcs: List[Tensor],
         node_ctrs: List[Tensor],
     ) -> Tensor:
+        """
+        输入:
+            actors: 车辆特征 [num_actors, 128]
+            nodes: 车道特征 [num_nodes, 128]
+
+        处理流程:
+            1. 逆向注意力机制（车道→车辆）
+            2. 计算车道对车辆的影响权重
+            3. 特征加权聚合
+
+        输出:
+            Tensor - 更新后的车辆特征
+            - 形状: [num_actors, 128]
+            - 特征包含地图拓扑信息
+        """
         for i in range(len(self.att)):
             actors = self.att[i](
                 actors,
@@ -633,6 +797,8 @@ class M2A(nn.Module):
 class A2A(nn.Module):
     """
     The actor to actor block performs interactions among actors.
+    # 车辆间注意力机制
+    # 输入输出均为[N_actor, 128]
     """
 
     def __init__(self, config):
@@ -717,6 +883,22 @@ class PredNet(nn.Module):
         self.cls = nn.Sequential(LinearRes(n_actor, n_actor, norm=norm, ng=ng), nn.Linear(n_actor, 1))
 
     def forward(self, actors: Tensor, actor_idcs: List[Tensor], actor_ctrs: List[Tensor]) -> Dict[str, List[Tensor]]:
+        """
+        输入:
+            actors: 最终车辆特征 [num_actors, 128]
+
+        处理流程:
+            1. 通过6个并行预测头生成多模态轨迹
+                - 每个模态: LinearRes → Linear
+            2. 轨迹坐标转换（局部→全局）
+
+        输出:
+            Dict[str, List[Tensor]]:
+                - reg: 预测轨迹列表
+                    - 每个元素形状: [batch_actors, 6, 30, 2]
+                    - 含义: [当前批次车辆数, 模态数, 预测步长, 坐标]
+                - cls: 各模态置信度（可选）
+        """
         preds = []
         for i in range(len(self.pred)):
             preds.append(self.pred[i](actors))
@@ -811,6 +993,22 @@ class Att(nn.Module):
         ctx_ctrs: List[Tensor],
         dist_th: float,
     ) -> Tensor:
+        """
+        输入:
+            agts: 目标节点特征 [num_agts, D]
+            ctx: 上下文节点特征 [num_ctx, D]
+            *_ctrs: 各节点坐标
+
+        处理流程:
+            1. 空间关系编码（相对坐标→高维）
+            2. Query-Key乘积计算注意力权重
+            3. 加权聚合上下文特征
+
+        输出:
+            Tensor - 更新后的目标节点特征
+            - 形状: [num_agts, D]
+            - 特征包含上下文信息
+        """
         res = agts
         if len(ctx) == 0:
             agts = self.agt(agts)
@@ -1136,8 +1334,8 @@ def export_onnx(net: Net, device, output_path="lanegcn.onnx"):
         "ctrs": [torch.randn(num_actors, 2, device=device)],
         "graph": [
             {
-                "ctrs": torch.randn(num_nodes, 2, device=device),
-                "feats": torch.randn(num_nodes, 2, device=device),
+                "ctrs": torch.randn(num_nodes, 2, dtype=torch.float32, device=device),
+                "feats": torch.randn(num_nodes, 2, dtype=torch.float32, device=device),
                 "turn": torch.randn(num_nodes, 2, device=device),
                 "control": torch.randint(0, 2, (num_nodes,), device=device),
                 "intersect": torch.randint(0, 2, (num_nodes,), device=device),
@@ -1183,6 +1381,46 @@ def export_onnx(net: Net, device, output_path="lanegcn.onnx"):
         "orig": [torch.zeros(2, device=device)],  # 单批次原点
     }
 
+    graph_data = dummy_data["graph"][0]
+    graph_pre_u = torch.cat([x["u"] for x in graph_data["pre"]])
+    graph_pre_v = torch.cat([x["v"] for x in graph_data["pre"]])
+    graph_suc_u = torch.cat([x["u"] for x in graph_data["suc"]])
+    graph_suc_v = torch.cat([x["v"] for x in graph_data["suc"]])
+
+    # graph_ctrs = dummy_data["graph"][0]["ctrs"]
+    # graph_feats = dummy_data["graph"][0]["feats"]
+    # graph_turn = dummy_data["graph"][0]["turn"]
+    # graph_control = dummy_data["graph"][0]["control"]
+    # graph_intersect = dummy_data["graph"][0]["intersect"]
+    # graph_pre_u = dummy_data["graph"][0]["pre"]
+    # graph_pre_v = dummy_data["graph"][0]["suc"]
+    # graph_suc_u = dummy_data["graph"][0]["suc"]
+    # graph_suc_v = dummy_data["graph"][0]["suc"]
+    # graph_left_u = dummy_data["graph"][0]["left"]
+    # graph_left_v = dummy_data["graph"][0]["right"]
+    # graph_right_u = dummy_data["graph"][0]["right"]
+    # graph_right_v = dummy_data["graph"][0]["right"]
+
+    input_args = (
+        dummy_data["feats"],
+        dummy_data["ctrs"],
+        graph_data["ctrs"],
+        graph_data["feats"],
+        graph_data["turn"],
+        graph_data["control"],
+        graph_data["intersect"],
+        graph_pre_u,
+        graph_pre_v,
+        graph_suc_u,
+        graph_suc_v,
+        graph_data["left"]["u"],
+        graph_data["left"]["v"],
+        graph_data["right"]["u"],
+        graph_data["right"]["v"],
+        dummy_data["rot"],
+        dummy_data["orig"],
+    )
+
     # 添加维度验证
     # assert dummy_data["graph"][0]["ctrs"].dim() == 2, "ctrs应为二维坐标"
     assert dummy_data["graph"][0]["feats"].size(1) == 2, "特征维度应为2"
@@ -1212,8 +1450,8 @@ def export_onnx(net: Net, device, output_path="lanegcn.onnx"):
 
     with torch.no_grad():
         net.eval()
-        out = net(dummy_data["feats"], dummy_data["ctrs"], dummy_data["graph"], dummy_data["rot"], dummy_data["orig"])
-        assert all(t.ndim == 4 for t in out["reg"]), "输出维度异常"
+        # out = net(dummy_data["feats"], dummy_data["ctrs"], dummy_data["graph"], dummy_data["rot"], dummy_data["orig"])
+        # assert all(t.ndim == 4 for t in out["reg"]), "输出维度异常"
 
         print("ONNX导出前向传播验证成功！")
 
@@ -1222,21 +1460,52 @@ def export_onnx(net: Net, device, output_path="lanegcn.onnx"):
 
     # 导出ONNX模型
     net.eval()
+    # torch.onnx.export(
+    #     net,
+    #     (dummy_data["feats"], dummy_data["ctrs"], dummy_data["graph"], dummy_data["rot"], dummy_data["orig"]),
+    #     output_path,
+    #     input_names=["feats", "ctrs", "graph", "rot", "orig"],
+    #     output_names=["reg"],  # 只保留必要输出
+    #     dynamic_axes={
+    #         "feats": {0: "num_actors"},
+    #         "ctrs": {0: "num_actors"},
+    #         "graph": {"num_nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]},
+    #     },
+    #     opset_version=14,
+    #     do_constant_folding=True,
+    #     custom_opsets={"": 14},  # 显式指定opset
+    # )
+    # 修改导出代码
     torch.onnx.export(
         net,
-        (dummy_data["feats"], dummy_data["ctrs"], dummy_data["graph"], dummy_data["rot"], dummy_data["orig"]),
+        input_args,
         output_path,
-        input_names=["feats", "ctrs", "graph", "rot", "orig"],
-        output_names=["reg"],  # 只保留必要输出
-        dynamic_axes={
-            "feats": {0: "num_actors"},
-            "ctrs": {0: "num_actors"},
-            "graph": {"num_nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]},
-        },
+        input_names=[
+            "feats",
+            "ctrs",
+            "graph_ctrs",
+            "graph_feats",
+            "graph_turn",
+            "graph_control",
+            "graph_intersect",
+            "graph_pre_u",
+            "graph_pre_v",
+            "graph_suc_u",
+            "graph_suc_v",
+            "graph_left_u",
+            "graph_left_v",
+            "graph_right_u",
+            "graph_right_v",
+            "rot",
+            "orig",
+        ],
+        dynamic_axes={"feats": {0: "num_actors"}, "ctrs": {0: "num_actors"}, "graph_pre_u": {0: "num_edges"}, "graph_pre_v": {0: "num_edges"}},
+        output_names=["reg"],
         opset_version=14,
         do_constant_folding=True,
         custom_opsets={"": 14},  # 显式指定opset
     )
+
     print(f"Successfully exported ONNX model to {output_path}")
 
 

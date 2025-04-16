@@ -37,7 +37,8 @@ class Conv(nn.Module):
         )
 
         if norm == "GN":
-            self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
+            # self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
+            self.norm = nn.GroupNorm(16, n_out)  # 确保128%16==0
         elif norm == "BN":
             self.norm = nn.BatchNorm2d(n_out)
         else:
@@ -79,7 +80,9 @@ class Conv1d(nn.Module):
         )
 
         if norm == "GN":
-            self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
+            # self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
+            self.norm = nn.GroupNorm(16, n_out)  # 确保128%16==0
+            
         elif norm == "BN":
             self.norm = nn.BatchNorm1d(n_out)
         else:
@@ -104,7 +107,9 @@ class Linear(nn.Module):
         self.linear = nn.Linear(n_in, n_out, bias=False)
 
         if norm == "GN":
-            self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
+            # self.norm = nn.GroupNorm(gcd(ng, n_out), n_out)
+            self.norm = nn.GroupNorm(16, n_out)  # 确保128%16==0
+            
         elif norm == "BN":
             self.norm = nn.BatchNorm1d(n_out)
         else:
@@ -195,6 +200,12 @@ class Res1d(nn.Module):
     └────────────────────────────────────┘
                                         │
                                         Output
+                                        
+    输入形状: [batch, channels, seq_len]
+    输出形状: 保持输入形状
+    结构：
+        Conv1d → GN → ReLU → Conv1d → GN → Add → ReLU
+    功能：提取时序特征，残差连接避免梯度消失
     """
 
     def __init__(
@@ -265,6 +276,12 @@ class LinearRes(nn.Module):
     原理：将残差思想应用于全连接层
         x → linear1 → norm1 → relu → linear2 → norm2 → + → relu
         |_____________________________________________|
+        
+    输入形状: [..., features]
+    输出形状: 保持特征维度
+    结构：
+        Linear → GN → ReLU → Linear → GN → Add → ReLU
+    功能：全连接层的残差变体，增强特征表达能力
     """
 
     def __init__(self, n_in, n_out, norm="GN", ng=32):

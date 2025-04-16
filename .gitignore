@@ -1,0 +1,14 @@
+*/__pycache__/*
+*~
+*/*.pyc
+log/*
+saved_models/20*
+data_argo/features*
+data_av2/features*
+
+av2/*
+av2-bk/*
+argoverse/*
+argoverse-bk/*
+map_files/*
+output/*
